@@ -151,7 +151,7 @@ function ensureSources(map) {
       clusterRadius: 52,
     })
   }
-  for (const id of ['sectors', 'spider', 'labels', 'holes', 'measure', 'user', 'probe', 'planned', 'neighbors', 'candidate', 'dt-paths']) {
+  for (const id of ['sectors', 'spider', 'labels', 'holes', 'measure', 'user', 'probe', 'planned', 'neighbors', 'candidate', 'dt-paths', 'dt-preview']) {
     if (!map.getSource(id)) {
       map.addSource(id, { type: 'geojson', data: emptyFc(), promoteId: 'id' })
     }
@@ -258,11 +258,23 @@ function ensureLayers(map, recipe = {}) {
     },
   })
   addLayer(map, {
+    id: 'dt-preview', type: 'circle', source: 'dt-preview',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 1.4, 12, 2.2, 16, 3.3],
+      'circle-color': '#1f5f8f',
+      'circle-opacity': 0.78,
+      'circle-stroke-width': 0.8,
+      'circle-stroke-color': '#f6f8fb',
+      'circle-stroke-opacity': 0.88,
+    },
+    layout: { visibility: recipe.dtLayer ? 'visible' : 'none' },
+  })
+  addLayer(map, {
     id: 'dt-path', type: 'line', source: 'dt-paths',
     paint: {
-      'line-color': '#5F7488',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.2, 12, 1.8, 16, 2.4],
-      'line-opacity': 0.78,
+      'line-color': '#3E6180',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.6, 12, 2.6, 16, 3.8],
+      'line-opacity': 0.92,
     },
     layout: { visibility: recipe.dtLayer ? 'visible' : 'none' },
   })
@@ -374,6 +386,9 @@ function ensureLayers(map, recipe = {}) {
   if (map.getLayer('dt-path')) {
     map.setLayoutProperty('dt-path', 'visibility', vis(!!recipe.dtLayer))
   }
+  if (map.getLayer('dt-preview')) {
+    map.setLayoutProperty('dt-preview', 'visibility', vis(!!recipe.dtLayer))
+  }
   if (map.getLayer('sectors')) {
     map.setLayerZoomRange('sectors', 10, three ? 15 : 24)
   }
@@ -440,6 +455,7 @@ export function dressAndPaint(map, geo, recipe, extras = {}) {
     map.getSource('neighbors')?.setData(extras.neighborLines || emptyFc())
     map.getSource('candidate')?.setData(extras.candidateFc || emptyFc())
     map.getSource('dt-paths')?.setData(recipe.dtLayer && extras.dtPaths ? extras.dtPaths : emptyFc())
+    map.getSource('dt-preview')?.setData(recipe.dtLayer && extras.dtPreview ? extras.dtPreview : emptyFc())
     setSelectedState(map, extras.selectedId || null)
     setNeighborState(map, extras.neighborIds)
     paintHeavy(map, { gh: extras.gh, dt: extras.dt, recipe }).catch((err) => {
@@ -573,6 +589,7 @@ export function visibleLayers(geo, recipe, userFc, extras = {}) {
   if (extras.candidateFc?.features?.length) layers.push({ name: 'candidate', fc: extras.candidateFc })
   if (recipe.holesLayer && extras.holes?.features?.length) layers.push({ name: 'holes', fc: extras.holes })
   if (recipe.dtLayer && extras.dtPaths?.features?.length) layers.push({ name: 'dt-paths', fc: extras.dtPaths })
+  if (recipe.dtLayer && extras.dtPreview?.features?.length) layers.push({ name: 'dt-preview', fc: extras.dtPreview })
   if (userFc?.features?.length) layers.push({ name: 'user', fc: userFc })
   return layers
 }

@@ -2,31 +2,36 @@ import { v } from './lobes.js'
 import { defaultRecipe, nPts } from './filters.js'
 
 const KEY = 'n1_openai_key'
+const KEY_CLAUDE = 'n1_anthropic_key'
+const KEY_USER_ID = 'n1_user_id'
+const KEY_REF_CTX = 'n1_ref_ctx'
 
 /** Verbs for the Copilot rail — labels are what the engineer sees; ask is what parseAsk matches. */
 export function contextChips({ section, selected, inv } = {}) {
   const chips = []
   if (section === 'gh') {
-    chips.push({ label: 'Coverage holes', ask: 'coverage holes', hint: 'Enable hole polygons' })
-    chips.push({ label: 'Drive routes', ask: 'show drive test', hint: 'Show DT path + points' })
-    chips.push({ label: 'Overview', ask: 'back to overview', hint: 'Return to base map' })
+    chips.push({ label: 'Drive test nearby', ask: selected ? `daily drive test near ${selected}` : 'daily drive test', hint: 'Switch to DT around current focus' })
+    chips.push({ label: 'Coverage holes', ask: 'coverage holes', hint: 'Show GH <= -105 dBm zones' })
+    chips.push({ label: 'Back to overview', ask: 'back to overview', hint: 'Reset map context' })
   } else if (section === 'dt') {
-    chips.push({ label: 'Groundhog', ask: 'show groundhog', hint: 'Switch to GH heatmap' })
-    chips.push({ label: 'Overview', ask: 'back to overview', hint: 'Return to base map' })
+    chips.push({ label: 'Groundhog layer', ask: 'show groundhog', hint: 'Switch to GH heatmap' })
+    chips.push({ label: 'Tier-1 neighbours', ask: selected ? `tier-1 neighbours for ${selected}` : 'tier-1 neighbours for TOK_001', hint: 'Start neighbour analysis' })
+    chips.push({ label: 'Back to overview', ask: 'back to overview', hint: 'Reset map context' })
   } else if (section === 'holes') {
-    chips.push({ label: 'Groundhog', ask: 'show groundhog', hint: 'Keep GH, hide holes' })
-    chips.push({ label: 'Overview', ask: 'back to overview', hint: 'Return to base map' })
+    chips.push({ label: 'Groundhog layer', ask: 'show groundhog', hint: 'Keep GH, hide holes' })
+    chips.push({ label: 'Drive test nearby', ask: selected ? `daily drive test near ${selected}` : 'daily drive test', hint: 'Cross-check with DT' })
+    chips.push({ label: 'Back to overview', ask: 'back to overview', hint: 'Reset map context' })
   } else if (section === 'neighbors') {
-    chips.push({ label: 'Export JSON', ask: 'export neighbour audit json', hint: 'Download audit trail' })
-    chips.push({ label: 'Export CSV', ask: 'export neighbour audit csv', hint: 'Download tabular audit' })
-    chips.push({ label: 'Drop site', ask: 'drop a new site', hint: 'Create candidate pin' })
-    chips.push({ label: 'Overview', ask: 'back to overview', hint: 'Return to base map' })
+    chips.push({ label: 'Export audit JSON', ask: 'export neighbour audit json', hint: 'Save monitored set trail' })
+    chips.push({ label: 'Export audit CSV', ask: 'export neighbour audit csv', hint: 'Save tabular audit' })
+    chips.push({ label: 'Daily drive test', ask: selected ? `daily drive test near ${selected}` : 'daily drive test', hint: 'Inspect field route evidence' })
+    chips.push({ label: 'Back to overview', ask: 'back to overview', hint: 'Reset map context' })
   } else {
+    chips.push({ label: selected ? `Daily drive test near ${selected}` : 'Daily drive test', ask: selected ? `daily drive test near ${selected}` : 'daily drive test', hint: selected ? 'Focus DT around selected site' : 'Show DT with practical zoom' })
+    chips.push({ label: selected ? `Tier-1 for ${selected}` : 'Tier-1 neighbours', ask: selected ? `tier-1 neighbours for ${selected}` : 'tier-1 neighbours for TOK_001', hint: 'Facing sectors within 1.2 km' })
+    chips.push({ label: 'Sites in alarm', ask: 'sites in alarm', hint: 'Fault-focused shortlist' })
     chips.push({ label: 'Planned sites', ask: 'show planned sites', hint: 'Planned layer and filter' })
-    chips.push({ label: 'Sites in alarm', ask: 'macros in alarm', hint: 'Fault-focused shortlist' })
-    chips.push({ label: 'Drive routes', ask: 'show drive test', hint: 'Enable DT path + points' })
-    chips.push({ label: 'Groundhog', ask: 'show groundhog', hint: 'Enable GH signal layer' })
-    chips.push({ label: 'Drop site', ask: 'drop a new site', hint: 'Start Tier-1 workflow' })
+    chips.push({ label: 'Groundhog layer', ask: 'show groundhog', hint: 'Signal heatmap view' })
   }
   if (selected && inv?.sites?.some((s) => s.site_id === selected)) {
     if (section !== 'neighbors') chips.push({ label: `Tier-1 for ${selected}`, ask: `tier-1 neighbours for ${selected}`, hint: 'Facing sectors within 1.2 km' })
@@ -44,6 +49,102 @@ export function setKey(value) {
   const v = (value || '').trim()
   if (v) localStorage.setItem(KEY, v)
   else localStorage.removeItem(KEY)
+}
+
+export function getClaudeKey() {
+  return (localStorage.getItem(KEY_CLAUDE) || '').trim()
+}
+
+export function setClaudeKey(value) {
+  const v = (value || '').trim()
+  if (v) localStorage.setItem(KEY_CLAUDE, v)
+  else localStorage.removeItem(KEY_CLAUDE)
+}
+
+export function getUserId() {
+  let id = (localStorage.getItem(KEY_USER_ID) || '').trim()
+  if (id) return id
+  if (window.crypto?.randomUUID) id = `u_${window.crypto.randomUUID()}`
+  else id = `u_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+  localStorage.setItem(KEY_USER_ID, id)
+  return id
+}
+
+const refKey = () => `${KEY_REF_CTX}_${getUserId()}`
+
+function readRefCtx() {
+  try {
+    const raw = localStorage.getItem(refKey())
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeRefCtx(ctx) {
+  try { localStorage.setItem(refKey(), JSON.stringify(ctx || {})) } catch {}
+}
+
+function resolveReferences(text, inv, selectedId) {
+  const raw = String(text || '').trim()
+  if (!raw) return raw
+  const ctx = readRefCtx()
+  const alarms = inv.sites.filter((s) => s.in_alarm).map((s) => s.site_id)
+  const planned = inv.sites.filter((s) => v(s.status) === 'planned').map((s) => s.site_id)
+  const list = Array.isArray(ctx.lastSiteList) && ctx.lastSiteList.length ? ctx.lastSiteList : (alarms.length ? alarms : planned)
+  const fallback = selectedId || ctx.lastSiteId || list[0]
+  let out = raw
+  if (fallback) out = out.replace(/\b(that site|that one|same site|previous site)\b/ig, fallback)
+  const hasSiteToken = (s) => /\bTOK_[A-Z0-9_]+\b/i.test(String(s || ''))
+  const areaRef = out.match(/\b(?:one|site)\s+in\s+([a-z0-9][a-z0-9\s_-]{1,30})\b/i)
+  if (areaRef?.[1]) {
+    const area = areaRef[1].trim().toLowerCase()
+    const hit = inv.sites.find((s) => {
+      const bag = Object.values(s || {}).map((x) => String(x || '').toLowerCase()).join(' ')
+      return bag.includes(area)
+    })
+    if (hit?.site_id) out = out.replace(/\b(?:one|site)\s+in\s+[a-z0-9][a-z0-9\s_-]{1,30}\b/i, hit.site_id)
+    else if (hasSiteToken(fallback)) out = out.replace(/\b(?:one|site)\s+in\s+[a-z0-9][a-z0-9\s_-]{1,30}\b/i, fallback)
+  }
+  const alarmRef = out.match(/\b(?:one|site)\s+with\s+([a-z0-9][a-z0-9\s_-]{1,30})\s+alarm\b/i)
+  if (alarmRef?.[1]) {
+    const alarmKey = alarmRef[1].trim().toLowerCase()
+    const hit = inv.sites.find((s) => (s.alarms || []).some((a) => String(a?.problem || '').toLowerCase().includes(alarmKey)))
+    if (hit?.site_id) out = out.replace(/\b(?:one|site)\s+with\s+[a-z0-9][a-z0-9\s_-]{1,30}\s+alarm\b/i, hit.site_id)
+    else if (hasSiteToken(fallback)) out = out.replace(/\b(?:one|site)\s+with\s+[a-z0-9][a-z0-9\s_-]{1,30}\s+alarm\b/i, fallback)
+  }
+  const pickByOrdinal = (idx) => list[idx] || null
+  const first = pickByOrdinal(0)
+  const second = pickByOrdinal(1)
+  const third = pickByOrdinal(2)
+  if (first) out = out.replace(/\b(first one|first site|1st one|1st site)\b/ig, first)
+  if (second) out = out.replace(/\b(second one|second site|2nd one|2nd site)\b/ig, second)
+  if (third) out = out.replace(/\b(third one|third site|3rd one|3rd site)\b/ig, third)
+  return out
+}
+
+function rememberReferenceContext(intent, inv, selectedId, text) {
+  const ctx = readRefCtx()
+  const next = { ...ctx }
+  const mention = String(text || '').toUpperCase().match(/\bTOK_[A-Z0-9_]+\b/)
+  if (mention?.[0]) next.lastSiteId = mention[0]
+  if (selectedId) next.lastSiteId = selectedId
+  if (intent?.select) next.lastSiteId = intent.select
+  if (intent?.siteId) next.lastSiteId = intent.siteId
+  if (Array.isArray(intent?.siteList) && intent.siteList.length) next.lastSiteList = intent.siteList
+  if (intent?.fly === 'alarms') {
+    const alarms = inv.sites.filter((s) => s.in_alarm).map((s) => s.site_id)
+    if (alarms.length) {
+      next.lastSiteList = alarms
+      if (!next.lastSiteId) next.lastSiteId = alarms[0]
+    }
+  }
+  if (intent?.recipe?.status?.includes?.('planned')) {
+    const planned = inv.sites.filter((s) => v(s.status) === 'planned').map((s) => s.site_id)
+    if (planned.length) next.lastSiteList = planned
+  }
+  writeRefCtx(next)
 }
 
 function findSite(inv, text) {
@@ -84,9 +185,24 @@ export function parseAsk(text, inv, selectedId) {
   const raw = (text || '').trim()
   const t = raw.toLowerCase()
   if (!t) return { type: 'empty' }
+  const ctx = readRefCtx()
 
   const siteFromText = findSite(inv, raw)
   const site = siteFromText || inv.sites.find((s) => s.site_id === selectedId)
+
+  if (/last\s*3\s*sites|last three sites|recent 3 sites|recent three sites/.test(t)) {
+    const alarms = inv.sites.filter((s) => s.in_alarm).map((s) => s.site_id)
+    const planned = inv.sites.filter((s) => v(s.status) === 'planned').map((s) => s.site_id)
+    const list = (Array.isArray(ctx.lastSiteList) && ctx.lastSiteList.length ? ctx.lastSiteList : (alarms.length ? alarms : planned)).slice(0, 3)
+    if (!list.length) return { type: 'qa', narrate: 'No recent site list in context yet. Try: sites in alarm.' }
+    return {
+      type: 'qa',
+      narrate: `Last 3 sites: ${list.join(', ')}. You can say "show neighbours for second one".`,
+      siteList: list,
+      select: list[0],
+      fly: 'select',
+    }
+  }
 
   if (/\b3d\b|three.?d|terrain view/.test(t)) {
     const recipe = defaultRecipe()
@@ -123,12 +239,22 @@ export function parseAsk(text, inv, selectedId) {
     return { type: 'recipe', recipe, section: null, narrate: `${n} planned rooftops from the cell plan (siteType New) — gold rings. Not an ECGI-master coming-soon file.`, fly: 'planned' }
   }
 
-  if (/drive test|show drive|drive route|drive path/.test(t)) {
+  if (/daily drive|day drive|drive test|show drive|drive route|drive path/.test(t)) {
     const recipe = defaultRecipe()
     recipe.dtLayer = true
     recipe.ghLayer = false
     const routes = Number(inv.drive_test_paths?.n_routes || 0)
-    return { type: 'recipe', recipe, section: 'dt', narrate: `Drive test on: ${routes.toLocaleString()} routes, ${nPts(inv.drive_test).toLocaleString()} points.`, fly: 'dt' }
+    const sid = site?.site_id || null
+    return {
+      type: 'recipe',
+      recipe,
+      section: 'dt',
+      select: sid,
+      narrate: sid
+        ? `Daily drive test around ${sid}: ${routes.toLocaleString()} routes, ${nPts(inv.drive_test).toLocaleString()} points.`
+        : `Daily drive test on: ${routes.toLocaleString()} routes, ${nPts(inv.drive_test).toLocaleString()} points.`,
+      fly: sid ? 'dt-near' : 'dt-focus',
+    }
   }
 
   if (/groundhog|heatmap|rsrp layer/.test(t)) {
@@ -164,6 +290,31 @@ export function parseAsk(text, inv, selectedId) {
     const recipe = defaultRecipe()
     recipe.inAlarm = true
     return { type: 'recipe', recipe, narrate: 'Sites in alarm — TOK_NEW_02 VSWR, TOK_NEW_05 fronthaul.', fly: 'alarms' }
+  }
+
+  if (/\bfailing sites?\b|\bfailed sites?\b|problem sites?|bad sites?|worst sites?/.test(t)) {
+    const recipe = defaultRecipe()
+    recipe.inAlarm = true
+    return {
+      type: 'recipe',
+      recipe,
+      section: null,
+      narrate: 'Showing failing sites based on active alarms in this ingest.',
+      fly: 'alarms',
+    }
+  }
+
+  if (/\bfailing cells?\b|failed cells?|problem cells?|worst cells?/.test(t)) {
+    const recipe = defaultRecipe()
+    recipe.inAlarm = true
+    recipe.sectorsLayer = true
+    return {
+      type: 'recipe',
+      recipe,
+      section: null,
+      narrate: 'Showing sites with failing cells (alarm-linked) and sector view enabled.',
+      fly: 'alarms',
+    }
   }
 
   if (/facing east|point(?:ing)? east/.test(t)) {
@@ -230,16 +381,87 @@ export function parseAsk(text, inv, selectedId) {
 }
 
 export async function interpret(text, inv, selectedId) {
-  const local = parseAsk(text, inv, selectedId)
-  if (local.type !== 'help') return local
+  const rawText = String(text || '')
+  const resolvedText = resolveReferences(rawText, inv, selectedId)
+  const low = rawText.toLowerCase()
+  if (/\b(reset|clear)\b.*\b(memory|session|chat)\b|\bclear context\b/.test(low)) {
+    try {
+      const userId = getUserId()
+      const res = await fetch('/api/chat/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+        body: JSON.stringify({ user_id: userId }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        return { type: 'qa', narrate: `Session memory reset for ${data.user_id}. Cleared ${Number(data.cleared || 0)} messages.` }
+      }
+      return { type: 'qa', narrate: 'Could not reset session memory right now.' }
+    } catch {
+      return { type: 'qa', narrate: 'Could not reset session memory right now.' }
+    }
+  }
+  if (/\b(show|check|view)\b.*\b(memory|session|context)\b|\bmemory status\b/.test(low)) {
+    try {
+      const userId = getUserId()
+      const res = await fetch(`/api/chat/memory?user_id=${encodeURIComponent(userId)}`, {
+        method: 'GET',
+        headers: { 'X-User-Id': userId },
+      })
+      if (res.ok) {
+        const data = await res.json()
+        return {
+          type: 'qa',
+          narrate: `Session memory for ${data.user_id}: ${Number(data.count || 0)} stored messages (cap ${Number(data.max_messages || 0)}).`,
+        }
+      }
+      return { type: 'qa', narrate: 'Could not read session memory right now.' }
+    } catch {
+      return { type: 'qa', narrate: 'Could not read session memory right now.' }
+    }
+  }
+
+  const local = parseAsk(resolvedText, inv, selectedId)
+  if (local.type !== 'help') {
+    rememberReferenceContext(local, inv, selectedId, resolvedText)
+    return local
+  }
   const headers = { 'Content-Type': 'application/json' }
   const key = getKey()
   if (key) headers['X-OpenAI-Key'] = key
+  const claudeKey = getClaudeKey()
+  if (claudeKey) headers['X-Anthropic-Key'] = claudeKey
+  headers['X-User-Id'] = getUserId()
+
+  const toIntent = (raw) => {
+    const asText = String(raw || '').trim()
+    if (!asText) return local
+    const stripFence = asText.replace(/^```(?:json)?\s*/i, '').replace(/```$/i, '').trim()
+    const tryParse = (s) => {
+      try { return JSON.parse(s) } catch { return null }
+    }
+    let intent = tryParse(stripFence)
+    if (!intent) {
+      const m = stripFence.match(/\{[\s\S]*\}/)
+      if (m) intent = tryParse(m[0])
+    }
+    if (intent && typeof intent === 'object') {
+      if (intent.recipe) intent.recipe = { ...defaultRecipe(), ...intent.recipe }
+      if (!intent.type) intent.type = 'qa'
+      if (!intent.narrate) intent.narrate = 'Done.'
+      return intent
+    }
+    // If model returns plain text, still provide a useful response.
+    return { type: 'qa', narrate: stripFence }
+  }
+
+  const d = digest(inv, selectedId)
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers,
       body: JSON.stringify({
+        user_id: getUserId(),
         model: 'gpt-4o-mini',
         temperature: 0,
         response_format: { type: 'json_object' },
@@ -253,21 +475,104 @@ fly: planned|alarms|select|dt|gh|cluster|null.
 type "neighbors" shows Tier-1 facing neighbours for one inventory site — set siteId (required).
 type "drop" arms the pin-drop tool for a candidate rooftop (not an inventory site).
 type "audit" exports the current neighbour monitored set.
-Use only site ids from the digest. Never invent rooftops, 5G, mmWave, RIUD or DAS cells. If VOC has 0 geocoded points, say so. narrate one short sentence.`,
+Use previous turns for follow-up context (pronouns, "that site", "same filter").
+Use only site ids from the digest. Never invent rooftops, 5G, mmWave, RIUD or DAS cells. If VOC has 0 geocoded points, say so. narrate one short sentence.
+Current digest JSON: ${JSON.stringify(d)}`,
           },
-          { role: 'user', content: JSON.stringify({ ask: text, digest: digest(inv, selectedId) }) },
+          { role: 'user', content: resolvedText },
         ],
       }),
     })
-    if (res.status === 401 || !res.ok) return local
+    if (res.status === 401 || !res.ok) {
+      if (res.status === 429) return { type: 'qa', narrate: 'Copilot is rate-limited right now. Try again in a moment.' }
+      return local
+    }
     const data = await res.json()
     const raw = data.choices?.[0]?.message?.content
-    const intent = JSON.parse(raw)
-    if (intent.recipe) intent.recipe = { ...defaultRecipe(), ...intent.recipe }
-    if (!intent.narrate) intent.narrate = 'Done.'
+    const intent = toIntent(raw)
+    rememberReferenceContext(intent, inv, selectedId, resolvedText)
     return intent
   } catch {
     return local
+  }
+}
+
+export async function interpretWithStream(text, inv, selectedId, onDelta) {
+  const rawText = String(text || '')
+  const resolvedText = resolveReferences(rawText, inv, selectedId)
+  const low = rawText.toLowerCase()
+  if (/\b(reset|clear)\b.*\b(memory|session|chat)\b|\bclear context\b/.test(low) || /\b(show|check|view)\b.*\b(memory|session|context)\b|\bmemory status\b/.test(low)) {
+    const intent = await interpret(text, inv, selectedId)
+    return { intent, streamed: false }
+  }
+  const local = parseAsk(resolvedText, inv, selectedId)
+  if (local.type !== 'help') {
+    rememberReferenceContext(local, inv, selectedId, resolvedText)
+    return { intent: local, streamed: false }
+  }
+
+  const headers = { 'Content-Type': 'application/json' }
+  const key = getKey()
+  if (key) headers['X-OpenAI-Key'] = key
+  const claudeKey = getClaudeKey()
+  if (claudeKey) headers['X-Anthropic-Key'] = claudeKey
+  const userId = getUserId()
+  headers['X-User-Id'] = userId
+  const d = digest(inv, selectedId)
+
+  try {
+    const res = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        user_id: userId,
+        model: 'gpt-4o-mini',
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content: `You are Copilot for a Tokyo RAN GIS tool.
+Answer in plain text only, concise and actionable. No JSON, no markdown table.
+Use previous turns for follow-up context (pronouns, "that site", "same filter").
+Never invent rooftop/site ids.
+Current digest JSON: ${JSON.stringify(d)}`,
+          },
+          { role: 'user', content: resolvedText },
+        ],
+      }),
+    })
+    if (!res.ok || !res.body) return { intent: local, streamed: false }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let full = ''
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const chunks = buf.split('\n\n')
+      buf = chunks.pop() || ''
+      for (const block of chunks) {
+        const line = block.split('\n').find((x) => x.startsWith('data: '))
+        if (!line) continue
+        const payload = line.slice(6).trim()
+        if (!payload || payload === '[DONE]') continue
+        let obj = null
+        try { obj = JSON.parse(payload) } catch { obj = null }
+        if (!obj) continue
+        if (obj.delta) {
+          full += String(obj.delta)
+          if (onDelta) onDelta(String(obj.delta))
+        }
+        if (obj.done) break
+      }
+    }
+    const narrate = full.trim() || local.narrate || 'Try: planned sites, sites in alarm, show drive test, show groundhog, or tier-1 neighbours for TOK_001.'
+    const intent = { type: 'qa', narrate }
+    rememberReferenceContext(intent, inv, selectedId, resolvedText)
+    return { intent, streamed: true }
+  } catch {
+    return { intent: local, streamed: false }
   }
 }
 

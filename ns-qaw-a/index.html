@@ -2,13 +2,13 @@
 <html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
   <title>NineOne · Geo</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400..600&display=swap" />
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css" />
-  <link rel="stylesheet" href="styles.css?v=24" />
+  <link rel="stylesheet" href="styles.css?v=33" />
 </head>
 <body>
   <header class="dock top glass">
@@ -24,7 +24,6 @@
         <div class="typeahead" id="typeahead" hidden></div>
       </label>
       <button type="button" class="dock-btn" id="btn-rail" title="Layer panel (F)">Layers</button>
-      <button type="button" class="dock-btn" id="btn-copilot" title="Copilot (C)">Copilot</button>
     </div>
     <div class="dock-row tools-row">
       <div class="toolbar" id="tools" role="toolbar" aria-label="Spatial tools">
@@ -77,20 +76,27 @@
     <div class="facets" id="facets"></div>
   </aside>
 
-  <aside class="drawer drawer-right glass" id="copilot" hidden>
+  <aside class="glass" id="copilot" role="dialog" aria-label="Copilot chat" aria-modal="false" hidden>
     <header class="copilot-head">
       <div>
-        <div class="u-mono">Copilot + commands</div>
-        <h2>Spatial Actions</h2>
+        <div class="u-mono">Copilot chat</div>
+        <h2>Ask Copilot</h2>
       </div>
-      <button type="button" class="icon-btn" id="copilot-x">×</button>
+      <div class="copilot-head-actions">
+        <button type="button" class="icon-btn action-btn" id="copilot-clear" title="Clear visible transcript">Clear</button>
+        <button type="button" class="icon-btn action-btn" id="copilot-reset-memory" title="Reset server memory">Reset</button>
+        <button type="button" class="icon-btn" id="copilot-x">×</button>
+      </div>
     </header>
-    <div class="copilot-subhead u-mono">Quick Actions</div>
+    <div class="copilot-subhead">
+      <span class="u-mono">Quick prompts</span>
+      <span class="u-mono" id="copilot-status">Ready</span>
+    </div>
     <div class="starters" id="starters"></div>
     <div class="log" id="log" aria-live="polite"></div>
     <form class="composer" id="composer">
       <button type="button" class="mic" id="btn-mic" title="Voice command">Voice</button>
-      <input id="ask" type="text" autocomplete="off" />
+      <input id="ask" type="text" autocomplete="off" placeholder="Ask anything about sites, alarms, drive test, or neighbours..." />
       <button type="submit">Run</button>
     </form>
   </aside>
@@ -98,6 +104,9 @@
   <article class="card glass" id="card" hidden></article>
   <div class="measure glass" id="measure" hidden></div>
   </div>
+  <button type="button" id="copilot-fab" aria-controls="copilot" aria-label="Open Copilot chat" aria-expanded="false" title="Copilot chat (C)">
+    <span class="fab-icon" aria-hidden="true">💬</span>
+  </button>
 
   <footer class="dock bottom glass">
     <span class="pill-stat" id="hud-crs">CRS EPSG:4326</span>
@@ -111,6 +120,6 @@
   <script src="https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/deck.gl@9.1.12/dist.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@7/turf.min.js"></script>
-  <script type="module" src="app.js?v=24"></script>
+  <script type="module" src="app.js?v=50"></script>
 </body>
 </html>

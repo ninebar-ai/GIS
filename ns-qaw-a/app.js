@@ -1,8 +1,8 @@
 import { v, buildGeo, buildPlanned } from './lobes.js'
 import { defaultRecipe, applyRecipe, counts, chipList, dismissChip, renderFacets } from './filters.js'
-import { createMap, dressAndPaint, setMeasureData, setUserData, setProbeData, queryHit, setBasemap, visibleLayers, applyView, setSelectedState } from './map.js?v=24'
-import { searchHits, measureDistance, measureRadius, layersToGeoJSON, layersToKml, download, parseImport, snapshotCanvas, downloadPng } from './tools.js'
-import { interpret, contextChips } from './chat.js?v=24'
+import { createMap, dressAndPaint, setMeasureData, setUserData, setProbeData, queryHit, setBasemap, visibleLayers, applyView, setSelectedState } from './map.js?v=27'
+import { searchHits, measureDistance, measureRadius, layersToGeoJSON, layersToKml, download, parseImport, snapshotCanvas, downloadPng } from './tools.js?v=27'
+import { interpretWithStream, contextChips, getUserId } from './chat.js?v=37'
 import { loadPacked, pickPoint, describePick } from './heavy.js'
 import { buildHoles } from './holes.js'
 import { tier1Candidates, tier1CandidatesAt, monitoredIds, neighborLines, candidateFc, PIN_ID, sessionKey, persistNeighbors, recallNeighbors, applyRecall, appendEvent, auditPayload, auditCsv } from './neighbors.js'
@@ -24,6 +24,38 @@ const state = {
   cursor: null,
   frameMs: null,
   dtPaths: { type: 'FeatureCollection', features: [] },
+  dtPreview: { type: 'FeatureCollection', features: [] },
+  voiceGreeted: false,
+  chatBusy: false,
+}
+
+const CHAT_LOG_MAX = 80
+const chatKey = () => `n1_chat_log_${getUserId()}`
+
+function readChatLog() {
+  try {
+    const raw = localStorage.getItem(chatKey())
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function writeChatLog(items) {
+  try {
+    localStorage.setItem(chatKey(), JSON.stringify(items.slice(-CHAT_LOG_MAX)))
+  } catch {}
+}
+
+function clearChatLog() {
+  try { localStorage.removeItem(chatKey()) } catch {}
+}
+
+function persistChatEntry(text, who, ts = Date.now()) {
+  const hist = readChatLog()
+  hist.push({ text: String(text ?? ''), who, ts })
+  writeChatLog(hist)
 }
 
 function recipeHash() {
@@ -67,6 +99,26 @@ function withNeighbors(sites, cells, neighborIds) {
   }
 }
 
+function buildDtPreview(dt, cap = 4800) {
+  const n = Number(dt?.n || 0)
+  const pos = dt?.positions
+  const rsrp = dt?.rsrp
+  if (!n || !pos || pos.length < 3) return { type: 'FeatureCollection', features: [] }
+  const step = Math.max(1, Math.ceil(n / cap))
+  const features = []
+  for (let i = 0; i < n; i += step) {
+    const lng = pos[i * 3]
+    const lat = pos[i * 3 + 1]
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) continue
+    features.push({
+      type: 'Feature',
+      properties: { id: `dtp_${i}`, rsrp: Number.isFinite(rsrp?.[i]) ? Number(rsrp[i]) : null, source: 'dt.bin' },
+      geometry: { type: 'Point', coordinates: [lng, lat] },
+    })
+  }
+  return { type: 'FeatureCollection', features }
+}
+
 function paint() {
   const neighborIds = monitoredIds(state.neighbors)
   const nbLines = state.neighbors ? neighborLines(state.inv, state.neighbors, neighborIds) : null
@@ -83,6 +135,7 @@ function paint() {
       gh: state.heavy?.gh,
       dt: state.heavy?.dt,
       dtPaths: state.dtPaths,
+      dtPreview: state.dtPreview,
       selectedId: state.selected,
       holes: state.holesFc,
       neighborIds,
@@ -318,12 +371,22 @@ function cinematic() {
   })
 }
 
+function validJapanCoord(lng, lat) {
+  return Number.isFinite(lng) && Number.isFinite(lat) && lng >= 122 && lng <= 154 && lat >= 20 && lat <= 47
+}
+
 function flyToSite(id) {
   const s = siteOf(id)
   if (!s || !state.map) return
+  const lng = Number(v(s.lng))
+  const lat = Number(v(s.lat))
+  if (!validJapanCoord(lng, lat)) {
+    logMsg(`No valid map coordinates for ${id}. Kept current view.`)
+    return
+  }
   const three = state.recipe.view === '3d'
   state.map.flyTo({
-    center: [v(s.lng), v(s.lat)],
+    center: [lng, lat],
     zoom: Math.max(state.map.getZoom(), three ? 15.2 : 14.6),
     pitch: three ? 68 : 0,
     duration: 900,
@@ -331,7 +394,10 @@ function flyToSite(id) {
 }
 
 function flySet(pred) {
-  const pts = state.inv.sites.filter(pred).map((s) => [v(s.lng), v(s.lat)])
+  const pts = state.inv.sites
+    .filter(pred)
+    .map((s) => [Number(v(s.lng)), Number(v(s.lat))])
+    .filter((p) => validJapanCoord(p[0], p[1]))
   if (!pts.length) return
   const b = pts.reduce((acc, p) => acc.extend(p), new maplibregl.LngLatBounds(pts[0], pts[0]))
   state.map.fitBounds(b, { padding: 90, duration: 900, maxZoom: 15, pitch: state.recipe.view === '3d' ? 58 : 0 })
@@ -341,6 +407,62 @@ function flyBbox(b) {
   if (!b || b.length < 4) return cinematic()
   const bounds = new maplibregl.LngLatBounds([b[0], b[1]], [b[2], b[3]])
   state.map.fitBounds(bounds, { padding: 80, duration: 1100, maxZoom: 14.2, pitch: state.recipe.view === '3d' ? 52 : 0 })
+}
+
+function flyDtFocus(b) {
+  if (!b || b.length < 4 || !state.map) return cinematic()
+  const cx = (b[0] + b[2]) / 2
+  const cy = (b[1] + b[3]) / 2
+  const three = state.recipe.view === '3d'
+  state.map.flyTo({
+    center: [cx, cy],
+    zoom: Math.max(state.map.getZoom(), three ? 13.6 : 13.15),
+    pitch: three ? 58 : 0,
+    duration: 950,
+  })
+}
+
+function nearestDtPoint(lng, lat) {
+  const fc = state.dtPaths
+  if (!fc?.features?.length) return null
+  let best = null
+  let bestD = Infinity
+  for (const f of fc.features) {
+    const coords = f?.geometry?.coordinates
+    if (!Array.isArray(coords) || coords.length < 2) continue
+    const stride = Math.max(1, Math.ceil(coords.length / 220))
+    for (let i = 0; i < coords.length; i += stride) {
+      const p = coords[i]
+      if (!Array.isArray(p) || p.length < 2) continue
+      const dx = p[0] - lng
+      const dy = p[1] - lat
+      const d = dx * dx + dy * dy
+      if (d < bestD) {
+        bestD = d
+        best = p
+      }
+    }
+  }
+  return best
+}
+
+function flyDtNearSelection() {
+  if (!state.map) return
+  let target = null
+  const selected = state.selected && state.selected !== PIN_ID ? siteOf(state.selected) : null
+  if (selected) target = nearestDtPoint(v(selected.lng), v(selected.lat))
+  if (!target) {
+    const c = state.map.getCenter()
+    target = nearestDtPoint(c.lng, c.lat)
+  }
+  if (!target) return flyDtFocus(state.heavy?.dt?.bbox || state.inv.drive_test?.bbox)
+  const three = state.recipe.view === '3d'
+  state.map.flyTo({
+    center: [target[0], target[1]],
+    zoom: Math.max(state.map.getZoom(), three ? 14.4 : 14.2),
+    pitch: three ? 56 : 0,
+    duration: 900,
+  })
 }
 
 function select(id) {
@@ -460,26 +582,126 @@ function exportAudit(kind) {
   logMsg(`Neighbour audit saved (${payload.monitored.length} monitored).`)
 }
 
-function logMsg(text, who = 'bot') {
+function logMsg(text, who = 'bot', opts = {}) {
+  const panel = $('copilot')
+  const log = $('log')
+  if (!log) return
+  const edge = log.scrollHeight - log.scrollTop - log.clientHeight
+  const nearBottom = edge < 28
+  if (panel && (who === 'user' || log.children.length || !panel.hidden)) panel.dataset.chat = '1'
   const div = document.createElement('div')
   div.className = `msg ${who}`
-  div.innerHTML = text
-  $('log').appendChild(div)
-  $('log').scrollTop = $('log').scrollHeight
+  const ts = opts.ts || Date.now()
+  const meta = document.createElement('div')
+  meta.className = 'msg-meta'
+  meta.textContent = `${who === 'user' ? 'You' : 'Copilot'} · ${new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+  const body = document.createElement('div')
+  body.className = 'msg-body'
+  body.textContent = String(text ?? '')
+  div.appendChild(meta)
+  div.appendChild(body)
+  log.appendChild(div)
+  if (opts.persist !== false) {
+    persistChatEntry(text, who, ts)
+  }
+  // Force layout flush so a just-submitted user prompt paints immediately.
+  // This avoids "message N shows after message N+1" on some event loops.
+  void div.offsetHeight
+  if (nearBottom || who === 'user') log.scrollTop = log.scrollHeight
+  return div
+}
+
+async function typeBotMessage(text, speedMs = 10) {
+  const full = String(text ?? '')
+  const ts = Date.now()
+  const div = logMsg('', 'bot', { persist: false, ts })
+  const body = div?.querySelector('.msg-body')
+  if (!body) {
+    persistChatEntry(full, 'bot', ts)
+    return
+  }
+  setChatBusy(true, 'Responding...')
+  let i = 0
+  while (i < full.length) {
+    i = Math.min(full.length, i + 2)
+    body.textContent = full.slice(0, i)
+    const log = $('log')
+    if (log) log.scrollTop = log.scrollHeight
+    await new Promise((resolve) => setTimeout(resolve, speedMs))
+  }
+  persistChatEntry(full, 'bot', ts)
+}
+
+function createStreamingBotMessage() {
+  const ts = Date.now()
+  const div = logMsg('', 'bot', { persist: false, ts })
+  const body = div?.querySelector('.msg-body')
+  let full = ''
+  return {
+    append(delta) {
+      const d = String(delta ?? '')
+      if (!d) return
+      full += d
+      if (body) body.textContent = full
+      const log = $('log')
+      if (log) log.scrollTop = log.scrollHeight
+    },
+    finish() {
+      persistChatEntry(full.trim(), 'bot', ts)
+      return full.trim()
+    },
+  }
+}
+
+function hydrateChatLog() {
+  const hist = readChatLog()
+  if (!hist.length) return
+  for (const m of hist) {
+    if (!m || !m.text || !m.who) continue
+    logMsg(m.text, m.who, { persist: false, ts: m.ts })
+  }
+}
+
+function setChatBusy(busy, label = '') {
+  state.chatBusy = !!busy
+  const panel = $('copilot')
+  if (panel) panel.dataset.busy = busy ? '1' : '0'
+  const status = $('copilot-status')
+  if (status) status.textContent = busy ? (label || 'Thinking...') : 'Ready'
+  const askInput = $('ask')
+  const runBtn = $('composer')?.querySelector('button[type="submit"]')
+  if (askInput) askInput.disabled = false
+  if (runBtn) runBtn.disabled = busy
 }
 
 function speak(text) {
   if (!state.voiceOut || !window.speechSynthesis) return
-  const clean = String(text || '').replace(/<[^>]+>/g, '')
+  const clean = String(text || '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/EPSG:4326/gi, 'W G S 84')
+    .replace(/TOK_/g, 'Tok ')
+    .trim()
+  if (!clean) return
+  const voices = window.speechSynthesis.getVoices?.() || []
+  const preferred =
+    voices.find((v) => /en/i.test(v.lang) && /(natural|neural|siri|google|microsoft|aria|jenny|guy)/i.test(v.name)) ||
+    voices.find((v) => /en/i.test(v.lang)) ||
+    voices[0] ||
+    null
   window.speechSynthesis.cancel()
   const u = new SpeechSynthesisUtterance(clean)
-  u.rate = 1.02
+  if (preferred) u.voice = preferred
+  u.lang = preferred?.lang || 'en-US'
+  u.rate = 0.96
+  u.pitch = 1.0
+  u.volume = 1.0
   window.speechSynthesis.speak(u)
 }
 
-function applyIntent(intent) {
+async function applyIntent(intent, opts = {}) {
   if (!intent || intent.type === 'empty') return
-  $('copilot').hidden = false
+  setCopilotOpen(true)
   if (intent.type === 'recipe' && intent.recipe) {
     const prevView = state.recipe.view
     const view = intent.recipe.view || prevView
@@ -493,7 +715,8 @@ function applyIntent(intent) {
     if (intent.fly === 'planned') flySet((s) => v(s.status) === 'planned')
     else if (intent.fly === 'alarms') flySet((s) => s.in_alarm)
     else if (intent.fly === 'select') flyToSite(state.selected)
-    else if (intent.fly === 'dt') flyBbox(state.heavy?.dt?.bbox || state.inv.drive_test?.bbox)
+    else if (intent.fly === 'dt' || intent.fly === 'dt-focus') flyDtFocus(state.heavy?.dt?.bbox || state.inv.drive_test?.bbox)
+    else if (intent.fly === 'dt-near') flyDtNearSelection()
     else if (intent.fly === 'gh') flyBbox(state.heavy?.gh?.bbox || state.inv.groundhog?.bbox)
     else if (intent.fly === 'cluster') cinematic()
   } else if (intent.type === 'select') {
@@ -510,8 +733,8 @@ function applyIntent(intent) {
     if (state.selected) paint()
     if (intent.fly === 'select' && state.selected) flyToSite(state.selected)
   }
-  if (intent.narrate) {
-    logMsg(intent.narrate)
+  if (intent.narrate && !opts.skipNarrate) {
+    await typeBotMessage(intent.narrate)
     speak(intent.narrate)
   }
   renderStarters()
@@ -521,16 +744,65 @@ function applyIntent(intent) {
 async function ask(q) {
   const text = (q || '').trim()
   if (!text) return
-  $('copilot').hidden = false
+  setCopilotOpen(true)
   logMsg(text, 'user')
-  const intent = await interpret(text, state.inv, state.selected)
-  applyIntent(intent)
+  setChatBusy(true, 'Thinking...')
+  // Yield one frame so the user prompt is visible before intent work starts.
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()))
+  try {
+    let stream = null
+    const { intent, streamed } = await interpretWithStream(
+      text,
+      state.inv,
+      state.selected,
+      (delta) => {
+        if (!stream) {
+          stream = createStreamingBotMessage()
+          setChatBusy(true, 'Responding...')
+        }
+        stream.append(delta)
+      },
+    )
+    if (streamed && stream) {
+      const finalText = stream.finish()
+      if (finalText) speak(finalText)
+    }
+    await applyIntent(intent, { skipNarrate: streamed })
+  } catch (err) {
+    logMsg(`Copilot error: ${err?.message || String(err)}`)
+  } finally {
+    setChatBusy(false)
+  }
 }
 
 function placeCard() {
   const card = $('card')
   if (!card || card.hidden) return
   card.classList.toggle('beside-rail', !$('rail').hidden)
+}
+
+function setCopilotOpen(open) {
+  const panel = $('copilot')
+  if (!panel) return
+  panel.hidden = !open
+  if (open && $('log')?.children.length) panel.dataset.chat = '1'
+  const fab = $('copilot-fab')
+  if (fab) {
+    fab.classList.toggle('on', open)
+    fab.setAttribute('aria-expanded', String(open))
+    fab.title = open ? 'Close Copilot chat (C)' : 'Open Copilot chat (C)'
+  }
+  if (open) {
+    $('ask')?.focus()
+    setTimeout(() => {
+      $('ask')?.focus()
+      const log = $('log')
+      if (log) log.scrollTop = log.scrollHeight
+    }, 0)
+  } else if (fab) {
+    setTimeout(() => fab.focus(), 0)
+  }
+  placeCard()
 }
 
 function updateHud() {
@@ -550,12 +822,17 @@ function updateHud() {
 }
 
 function toggle(id, show) {
+  if (id === 'copilot') {
+    const next = show === undefined ? $('copilot')?.hidden : !!show
+    setCopilotOpen(next)
+    if (window.innerWidth < 960 && next) $('rail').hidden = true
+    return
+  }
   const el = $(id)
   if (show === undefined) el.hidden = !el.hidden
   else el.hidden = !show
   if (window.innerWidth < 960) {
-    if (id === 'copilot' && !el.hidden) $('rail').hidden = true
-    if (id === 'rail' && !el.hidden) $('copilot').hidden = true
+    if (id === 'rail' && !el.hidden) setCopilotOpen(false)
   }
   placeCard()
 }
@@ -571,6 +848,16 @@ function bindVoice() {
   const rec = new Speech()
   rec.lang = 'en-US'
   rec.interimResults = false
+  rec.continuous = false
+  rec.onstart = () => {
+    if (!state.voiceGreeted) {
+      logMsg('Hi, I am Copilot. Tell me what you want to check, for example: daily drive test near TOK_NEW_03.')
+      state.voiceGreeted = true
+      speak('Hi, I am Copilot. I am listening. You can say, daily drive test near Tok New zero three.')
+    } else {
+      speak('I am listening.')
+    }
+  }
   rec.onresult = (e) => {
     const text = Array.from(e.results).map((r) => r[0].transcript).join(' ').trim()
     if (!text) return
@@ -584,7 +871,7 @@ function bindVoice() {
   }
   rec.onend = () => btn.classList.remove('on')
   btn.onclick = () => {
-    $('copilot').hidden = false
+    setCopilotOpen(true)
     if (btn.classList.contains('on')) {
       rec.stop()
       return
@@ -670,6 +957,7 @@ function bindTools() {
     candidateFc: candidateFc(state.neighbors),
     holes: state.holesFc,
     dtPaths: state.dtPaths,
+    dtPreview: state.dtPreview,
   })
   $('btn-geojson').onclick = () => {
     const extras = exportExtras()
@@ -681,11 +969,16 @@ function bindTools() {
     download('ns-qaw-a.kml', layersToKml(visibleLayers(state.geo, state.recipe, state.userFc, extras)), 'application/vnd.google-earth.kml+xml')
     logMsg('KML exports vector layers. Groundhog and DT sample points remain GPU-only; DT routes are included when enabled.')
   }
-  $('btn-shot').onclick = () => {
-    recipeHash()
-    downloadPng(snapshotCanvas(state.map), 'ns-qaw-a.png')
-    navigator.clipboard?.writeText(location.href)
-    logMsg('Snapshot saved. Recipe URL copied.')
+  $('btn-shot').onclick = async () => {
+    try {
+      recipeHash()
+      const png = await snapshotCanvas(state.map)
+      downloadPng(png, 'ns-qaw-a.png')
+      navigator.clipboard?.writeText(location.href)
+      logMsg('Snapshot saved. Recipe URL copied.')
+    } catch (err) {
+      logMsg(`Snapshot failed: ${err?.message || String(err)}`)
+    }
   }
 }
 
@@ -761,6 +1054,7 @@ async function boot() {
   ])
   state.heavy = { gh, dt }
   state.dtPaths = dtPaths
+  state.dtPreview = buildDtPreview(dt)
   state.holesFc = buildHoles(gh)
   const cam = loadHash()
   document.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === state.recipe.view))
@@ -809,16 +1103,55 @@ async function boot() {
   bindSearch()
   bindTools()
   bindVoice()
+  hydrateChatLog()
+  let askQueue = Promise.resolve()
+  const submitAsk = () => {
+    const input = $('ask')
+    if (!input) return
+    const q = input.value.trim()
+    input.value = ''
+    askQueue = askQueue.then(() => ask(q)).catch((err) => {
+      logMsg(`Copilot error: ${err?.message || String(err)}`)
+    })
+  }
   $('composer').addEventListener('submit', (e) => {
     e.preventDefault()
-    const q = $('ask').value.trim()
-    $('ask').value = ''
-    ask(q)
+    submitAsk()
+  })
+  const runBtn = $('composer')?.querySelector('button[type="submit"]')
+  if (runBtn) runBtn.addEventListener('click', (e) => { e.preventDefault(); submitAsk() })
+  $('ask').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      submitAsk()
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      setCopilotOpen(false)
+    }
   })
   $('btn-rail').onclick = () => toggle('rail')
-  $('btn-copilot').onclick = () => toggle('copilot')
+  if ($('btn-copilot')) $('btn-copilot').onclick = () => toggle('copilot')
+  if ($('copilot-fab')) $('copilot-fab').onclick = () => toggle('copilot')
   $('rail-x').onclick = () => { $('rail').hidden = true; placeCard() }
-  $('copilot-x').onclick = () => { $('copilot').hidden = true; placeCard() }
+  $('copilot-x').onclick = () => setCopilotOpen(false)
+  if ($('copilot-clear')) $('copilot-clear').onclick = () => {
+    const log = $('log')
+    if (log) log.innerHTML = ''
+    clearChatLog()
+    const panel = $('copilot')
+    if (panel) panel.dataset.chat = '0'
+    setChatBusy(false)
+    renderStarters()
+  }
+  if ($('copilot-reset-memory')) $('copilot-reset-memory').onclick = () => {
+    askQueue = askQueue.then(() => ask('reset memory')).catch((err) => {
+      logMsg(`Copilot error: ${err?.message || String(err)}`)
+      setChatBusy(false)
+    })
+  }
+  setCopilotOpen(false)
 
   window.addEventListener('keydown', (e) => {
     if (e.target.matches('input, textarea, select')) {
@@ -828,7 +1161,7 @@ async function boot() {
     if (e.key === '/') { e.preventDefault(); $('search').focus() }
     if (e.key === 'f' || e.key === 'F') toggle('rail')
     if (e.key === 'c' || e.key === 'C') toggle('copilot')
-    if (e.key === 'Escape') { clearNeighbors(); state.selected = null; state.section = null; $('rail').hidden = true; $('copilot').hidden = true; $('measure').hidden = true; setProbeData(state.map, null); paint(); renderStarters() }
+    if (e.key === 'Escape') { clearNeighbors(); state.selected = null; state.section = null; $('rail').hidden = true; setCopilotOpen(false); $('measure').hidden = true; setProbeData(state.map, null); paint(); renderStarters() }
   })
 }
 

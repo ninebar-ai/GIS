@@ -121,8 +121,97 @@ function kmlToFc(xml) {
   return { type: 'FeatureCollection', features }
 }
 
-export function snapshotCanvas(map) {
-  return map.getCanvas().toDataURL('image/png')
+async function waitForFrame(map) {
+  if (!map) return
+  try { map.triggerRepaint?.() } catch { /* */ }
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+}
+
+function waitMapIdle(map, ms = 1200) {
+  return new Promise((resolve) => {
+    if (!map) return resolve()
+    const settledNow = map.loaded?.() && map.isStyleLoaded?.() && (typeof map.areTilesLoaded !== 'function' || map.areTilesLoaded())
+    if (settledNow) return resolve()
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      try { map.off?.('idle', finish) } catch { /* */ }
+      resolve()
+    }
+    try { map.on?.('idle', finish) } catch { /* */ }
+    setTimeout(finish, ms)
+  })
+}
+
+function likelyBlank(ctx, w, h) {
+  const n = 14
+  let varied = 0
+  for (let i = 1; i <= n; i++) {
+    const x = Math.min(w - 1, Math.max(0, ((i * (w - 1)) / (n + 1)) | 0))
+    const y = Math.min(h - 1, Math.max(0, (((n - i + 1) * (h - 1)) / (n + 1)) | 0))
+    const d = ctx.getImageData(x, y, 1, 1).data
+    const r = d[0], g = d[1], b = d[2], a = d[3]
+    // Count pixels that are not near white/black transparent background.
+    const nearWhite = r > 242 && g > 242 && b > 242
+    const nearBlack = r < 12 && g < 12 && b < 12
+    if (a > 0 && !nearWhite && !nearBlack) varied++
+  }
+  return varied < 2
+}
+
+function composeMapCanvases(map) {
+  const base = map.getCanvas()
+  const w = base.width
+  const h = base.height
+  if (!w || !h) throw new Error('Map canvas has zero size')
+
+  const out = document.createElement('canvas')
+  out.width = w
+  out.height = h
+  const ctx = out.getContext('2d')
+  if (!ctx) throw new Error('2D canvas context unavailable')
+
+  // White sheet baseline so transparent layers don't export as black.
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, w, h)
+
+  const canvases = Array.from(map.getContainer().querySelectorAll('canvas'))
+  let drawn = 0
+  for (const c of canvases) {
+    const style = getComputedStyle(c)
+    if (style.display === 'none' || style.visibility === 'hidden') continue
+    if (!c.width || !c.height) continue
+    const alpha = Number(style.opacity || '1')
+    const prev = ctx.globalAlpha
+    ctx.globalAlpha = Number.isFinite(alpha) ? alpha : 1
+    try {
+      ctx.drawImage(c, 0, 0, w, h)
+      drawn++
+    } catch {
+      // Ignore non-readable canvases, continue with others.
+    }
+    ctx.globalAlpha = prev
+  }
+  if (!drawn) throw new Error('Could not read map canvases for snapshot')
+  return { out, ctx, w, h }
+}
+
+export async function snapshotCanvas(map) {
+  if (!map) throw new Error('Map is not ready')
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await waitMapIdle(map, 900)
+    await waitForFrame(map)
+    const { out, ctx, w, h } = composeMapCanvases(map)
+    if (!likelyBlank(ctx, w, h)) return out.toDataURL('image/png')
+    await new Promise((resolve) => setTimeout(resolve, 120))
+  }
+  // Fallback: return direct map canvas if compositing kept producing a blank image.
+  try {
+    await waitForFrame(map)
+    return map.getCanvas().toDataURL('image/png')
+  } catch { /* */ }
+  throw new Error('Snapshot looked blank after retries')
 }
 
 export function downloadPng(dataUrl, filename) {

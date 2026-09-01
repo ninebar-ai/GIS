@@ -271,8 +271,9 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .drawer-right {
   left: auto;
   right: 0;
-  width: min(360px, 90vw);
+  width: min(410px, 92vw);
   border-right: 0;
+  overflow: hidden;
 }
 .drawer header {
   display: flex;
@@ -296,11 +297,12 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .copilot-head h2 {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   font-family: Archivo, sans-serif;
-  font-size: 1.18rem;
+  font-size: 1.24rem;
   font-weight: 760;
   letter-spacing: -.012em;
+  line-height: 1.15;
 }
 .copilot-head p {
   margin: 4px 0 0;
@@ -309,8 +311,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   max-width: 32ch;
 }
 .copilot-subhead {
-  padding: 10px 14px 8px;
+  padding: 12px 16px 10px;
   border-bottom: 1px solid var(--rule-soft);
+  font-size: .69rem;
+  letter-spacing: .12em;
 }
 
 .facets {
@@ -593,28 +597,38 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .starters {
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 10px;
   border-bottom: 1px solid var(--rule);
+  background: linear-gradient(180deg, rgba(79, 100, 120, 0.06) 0%, rgba(79, 100, 120, 0) 100%);
+  flex: 0 0 auto;
+  max-height: 38%;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .starter {
   display: flex;
   flex-direction: column;
   text-align: left;
-  border: 0;
-  border-bottom: 1px solid var(--rule-soft);
-  background: transparent;
-  padding: 9px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--field);
+  padding: 10px 12px;
+  min-height: 54px;
 }
-.starter:last-child { border-bottom: 0; }
-.starter:hover { background: var(--wash); }
+.starter:last-child { border-bottom: 1px solid var(--rule); }
+.starter:hover { background: var(--surface-2); border-color: var(--accent-2); }
 .starter-label {
-  font-size: .8rem;
-  font-weight: 650;
-  line-height: 1.2;
+  font-size: .84rem;
+  font-weight: 680;
+  line-height: 1.24;
+  color: var(--ink);
 }
 .starter-hint {
-  margin-top: 3px;
-  font-size: .68rem;
-  color: var(--ink-3);
+  margin-top: 4px;
+  font-size: .71rem;
+  color: var(--ink-2);
+  line-height: 1.28;
 }
 
 .log {
@@ -624,32 +638,100 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   display: flex;
   flex-direction: column;
   gap: 10px;
+  background: var(--surface);
+  min-height: 180px;
+  border-top: 1px solid var(--rule-soft);
+}
+.log:empty::before {
+  content: "Start with a prompt or tap a quick prompt.";
+  display: block;
+  padding: 10px 12px;
+  border: 1px dashed var(--rule);
+  border-radius: 8px;
+  color: var(--ink-3);
+  font-size: .74rem;
 }
 .msg {
-  font-size: .8rem;
-  line-height: 1.38;
+  font-size: .83rem;
+  line-height: 1.45;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--rule-soft);
+  background: var(--field);
+}
+.msg-meta {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .62rem;
+  letter-spacing: .02em;
+  color: var(--ink-3);
+  margin-bottom: 3px;
+}
+.msg-body {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .msg.user {
-  font-size: .74rem;
-  color: var(--ink-3);
-  font-weight: 600;
+  font-size: .76rem;
+  color: var(--ink-2);
+  font-weight: 620;
+  background: #f4f7fb;
 }
 .composer {
   display: flex;
-  gap: 6px;
-  padding: 10px 12px 14px;
+  gap: 8px;
+  padding: 12px 14px 14px;
   border-top: 1px solid var(--rule);
+  background: var(--surface-2);
+  flex: 0 0 auto;
+}
+#copilot[data-busy="1"] .composer button[type="submit"] {
+  opacity: .72;
+}
+.composer input:disabled,
+.composer button:disabled {
+  cursor: not-allowed;
+  opacity: .72;
+}
+
+/* Once interaction starts, prioritize visible conversation area over starter list. */
+#copilot[data-chat="1"] .starters {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-height: 94px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  white-space: normal;
+}
+#copilot[data-chat="1"] .starter {
+  min-height: 0;
+  border-radius: 999px;
+  padding: 8px 11px;
+  width: fit-content;
+  flex: 0 0 auto;
+}
+#copilot[data-chat="1"] .starter-hint {
+  display: none;
+}
+#copilot[data-chat="1"] .starter-label {
+  font-size: .74rem;
+  font-weight: 650;
+}
+#copilot[data-chat="1"] .log {
+  min-height: 240px;
 }
 .mic, .composer input, .composer button[type="submit"] {
-  height: 32px;
-  border-radius: 6px;
+  height: 36px;
+  border-radius: 8px;
 }
 .mic {
   border: 1px solid var(--rule);
   background: var(--field);
-  font-size: .7rem;
+  font-size: .73rem;
   font-weight: 650;
-  padding: 0 10px;
+  padding: 0 12px;
 }
 .mic.on {
   background: var(--accent);
@@ -660,16 +742,17 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   flex: 1;
   border: 1px solid var(--rule);
   background: var(--field);
-  padding: 0 10px;
-  font-size: .76rem;
+  padding: 0 12px;
+  font-size: .8rem;
+  font-weight: 560;
 }
 .composer button[type="submit"] {
   border: 0;
   background: var(--ink);
   color: var(--surface);
-  font-size: .72rem;
+  font-size: .75rem;
   font-weight: 760;
-  padding: 0 12px;
+  padding: 0 14px;
 }
 
 .measure {
@@ -724,11 +807,115 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 
 .maplibregl-ctrl-top-right { top: 8px; right: 8px; }
 .maplibregl-ctrl-bottom-left { bottom: 8px; left: 8px; }
-.stage:has(#copilot:not([hidden])) .maplibregl-ctrl-top-right { right: 366px; }
+.stage:has(#copilot:not([hidden])) .maplibregl-ctrl-top-right { right: 8px; }
 .maplibregl-ctrl-group {
   background: var(--glass) !important;
   border: 1px solid var(--rule) !important;
   box-shadow: var(--shadow) !important;
+}
+
+/* Chatbot widget pattern */
+#copilot {
+  position: fixed;
+  right: 16px;
+  bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+  z-index: 30;
+  width: min(456px, calc(100vw - 22px));
+  height: min(74vh, 700px);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  overflow: hidden;
+}
+#copilot .copilot-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule-soft);
+}
+#copilot .copilot-head > div:first-child {
+  min-width: 0;
+}
+#copilot .copilot-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+#copilot .icon-btn.action-btn {
+  width: auto;
+  min-width: 54px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: .72rem;
+  font-weight: 670;
+}
+#copilot .copilot-subhead {
+  padding: 7px 16px 7px;
+  border-bottom: 1px solid var(--rule-soft);
+  background: var(--surface-2);
+  font-size: .64rem;
+  letter-spacing: .11em;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+#copilot-status {
+  color: var(--ink-3);
+}
+#copilot[data-busy="1"] #copilot-status {
+  color: var(--accent);
+}
+#copilot .starters {
+  max-height: 210px;
+  min-height: 0;
+  min-width: 0;
+  padding-inline: 14px;
+  scrollbar-gutter: stable both-edges;
+}
+#copilot .log {
+  min-height: 0;
+  min-width: 0;
+  padding: 10px 16px 12px;
+  scrollbar-gutter: stable both-edges;
+}
+#copilot .composer {
+  margin-top: 0;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--rule-soft);
+}
+
+#copilot-fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  z-index: 31;
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  background: var(--ink);
+  color: #fff;
+  box-shadow: var(--shadow);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.18rem;
+}
+#copilot-fab:hover { transform: translateY(-1px); }
+#copilot-fab.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.fab-icon {
+  line-height: 1;
+  transform: translateY(-1px);
 }
 
 @media (max-width: 960px) {
@@ -744,6 +931,26 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .card.beside-rail { left: 8px; }
   .measure { left: 8px; right: 8px; }
   #clock-label { max-width: 55vw; }
+  #copilot {
+    right: 0;
+    bottom: 0;
+    width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+  }
+  #copilot .composer {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  #copilot-fab {
+    right: 12px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    width: 52px;
+    height: 52px;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
