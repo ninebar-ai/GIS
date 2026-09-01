@@ -577,7 +577,15 @@ export async function setBasemap(map, name, after) {
   map.on('idle', finish)
   map.setStyle(target)
   timer = setTimeout(finish, 1200)
-  finish()
+  // No synchronous finish() call here: setStyle() kicks off an internal
+  // diff-and-patch transition for remote styles that isn't done just because
+  // isStyleLoaded() happens to still read true this tick. Firing finish() early
+  // races that transition — paint() adds our sources, then the diff step strips
+  // out anything not present in the target style's own JSON, since it never knew
+  // about app-added extras like 'sites'/'sectors'. That's why liberty and
+  // positron (the two remote-URL basemaps) permanently lost every site/sector
+  // after a switch. The style.load/idle listeners plus the timeout fallback
+  // above are enough on their own.
 }
 
 export function visibleLayers(geo, recipe, userFc, extras = {}) {
