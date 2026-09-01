@@ -181,11 +181,20 @@ function digest(inv, selectedId) {
   }
 }
 
+// A handful of local intents are greedy substring matches (a bare site id anywhere
+// in the text, the phrase "in alarm" anywhere in the text). That's fine for short
+// commands, but it hijacks genuine natural-language questions before they ever reach
+// the LLM — "why might TOK_005 have coverage problems" would otherwise short-circuit
+// to "Flew to TOK_005" without answering anything. Skip the greedy match instead and
+// let it fall through to the LLM, which has the full digest and conversation memory.
+const QUESTION_LIKE = /\b(why|how|what|when|where|which|who)\b|\?|\b(might|could|would|should|problem|issue|unusual|wrong)\b|^(is|does|was|are)\b|\bit\b/i
+
 export function parseAsk(text, inv, selectedId) {
   const raw = (text || '').trim()
   const t = raw.toLowerCase()
   if (!t) return { type: 'empty' }
   const ctx = readRefCtx()
+  const questionLike = QUESTION_LIKE.test(t)
 
   const siteFromText = findSite(inv, raw)
   const site = siteFromText || inv.sites.find((s) => s.site_id === selectedId)
@@ -286,7 +295,7 @@ export function parseAsk(text, inv, selectedId) {
     return { type: 'audit', format: /csv/.test(t) ? 'csv' : 'json', narrate: 'Exporting the monitored neighbour set and the add/remove trail.' }
   }
 
-  if (/\bin alarm\b|macros in alarm|sites in alarm/.test(t) && !/what/.test(t)) {
+  if (/\bin alarm\b|macros in alarm|sites in alarm/.test(t) && !questionLike) {
     const recipe = defaultRecipe()
     recipe.inAlarm = true
     return { type: 'recipe', recipe, narrate: 'Sites in alarm — TOK_NEW_02 VSWR, TOK_NEW_05 fronthaul.', fly: 'alarms' }
@@ -373,7 +382,7 @@ export function parseAsk(text, inv, selectedId) {
     return { type: 'qa', q: 'index', narrate: `Sukayat Open+Kanto: ${sx.open_kanto ?? 0} (no coords). ${JSON.stringify(sx.by_tech || {})}.` }
   }
 
-  if (siteFromText) {
+  if (siteFromText && !questionLike) {
     return { type: 'select', select: siteFromText.site_id, narrate: `Flew to ${siteFromText.site_id}.`, fly: 'select' }
   }
 
@@ -546,7 +555,8 @@ Current digest JSON: ${JSON.stringify(d)}`,
     const decoder = new TextDecoder()
     let buf = ''
     let full = ''
-    while (true) {
+    let streamDone = false
+    while (!streamDone) {
       const { value, done } = await reader.read()
       if (done) break
       buf += decoder.decode(value, { stream: true })
@@ -564,13 +574,25 @@ Current digest JSON: ${JSON.stringify(d)}`,
           full += String(obj.delta)
           if (onDelta) onDelta(String(obj.delta))
         }
-        if (obj.done) break
+        // obj.done only marks the server's logical end-of-message — the SSE
+        // connection itself is never closed server-side, so waiting for the
+        // reader to report done:true here hangs forever. Break the outer read
+        // loop too, and release the connection instead of leaving it dangling.
+        if (obj.done) { streamDone = true; break }
       }
     }
+    if (streamDone) {
+      try { await reader.cancel() } catch { /* */ }
+    }
+    // streamed must mean "the UI already showed this via onDelta" — if the
+    // provider call failed or produced no content, full is empty and nothing
+    // was ever appended to a bot message, so the caller needs to know that so
+    // it narrates the fallback text itself instead of silently showing nothing.
+    const gotContent = full.trim().length > 0
     const narrate = full.trim() || local.narrate || 'Try: planned sites, sites in alarm, show drive test, show groundhog, or tier-1 neighbours for TOK_001.'
     const intent = { type: 'qa', narrate }
     rememberReferenceContext(intent, inv, selectedId, resolvedText)
-    return { intent, streamed: true }
+    return { intent, streamed: gotContent }
   } catch {
     return { intent: local, streamed: false }
   }

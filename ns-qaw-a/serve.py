@@ -144,6 +144,10 @@ def _claude_to_openai_shape(data: dict) -> dict:
 
 def _merge_with_memory(req_payload: dict, user_id: str) -> dict:
     payload = dict(req_payload or {})
+    # user_id is our own bookkeeping field, not an OpenAI Chat Completions
+    # parameter — forwarding it verbatim gets the whole request rejected with
+    # a 400 ("Unrecognized request argument"). Never send it upstream.
+    payload.pop("user_id", None)
     msgs = list(payload.get("messages") or [])
     if not user_id or not msgs:
         return payload
@@ -309,7 +313,8 @@ class Handler(SimpleHTTPRequestHandler):
                             continue
                         full += delta
                         self._sse_send({"delta": delta})
-                except Exception:
+                except Exception as exc:
+                    print(f"OpenAI streaming failed: {type(exc).__name__}: {exc}")
                     full = ""
             if not full and claude_key:
                 claude_req = _openai_to_claude_payload(req_with_memory)
