@@ -12,6 +12,8 @@ import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from openai import OpenAI, OpenAIError
+
 HERE = Path(__file__).resolve().parent
 
 
@@ -31,7 +33,6 @@ def _load_dotenv(path: Path) -> None:
 
 _load_dotenv(HERE / ".env")
 PORT = int(os.environ.get("PORT", "8765"))
-OPENAI = "https://api.openai.com/v1/chat/completions"
 ANTHROPIC = "https://api.anthropic.com/v1/messages"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-latest")
 CLAUDE_MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "700"))
@@ -64,23 +65,19 @@ def _http_json_post(url: str, payload: dict, headers: dict, timeout: int = 60) -
         return err.code, payload
 
 
-def _openai_stream_lines(payload: dict, api_key: str, timeout: int = 90):
-    req = urllib.request.Request(
-        OPENAI,
-        data=_json_bytes(payload),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        },
-        method="POST",
-    )
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as res:
-        for raw in res:
-            line = raw.decode("utf-8", "replace").strip()
-            if line:
-                yield line
+def _openai_kwargs(payload: dict) -> dict:
+    """Allowlist just the fields the SDK call needs — never forward whatever the
+    client happened to send (that's how the old REST path ended up shipping our
+    own `user_id` bookkeeping field straight to OpenAI and getting every request
+    rejected with a 400)."""
+    kwargs: dict = {
+        "model": payload.get("model") or "gpt-4o-mini",
+        "messages": payload.get("messages") or [],
+        "temperature": payload.get("temperature", 0),
+    }
+    if payload.get("response_format"):
+        kwargs["response_format"] = payload["response_format"]
+    return kwargs
 
 
 def _openai_to_claude_payload(body: dict) -> dict:
@@ -296,24 +293,17 @@ class Handler(SimpleHTTPRequestHandler):
             full = ""
             if oai_key:
                 try:
-                    stream_req = dict(req_with_memory)
-                    stream_req["stream"] = True
-                    for line in _openai_stream_lines(stream_req, oai_key):
-                        if not line.startswith("data: "):
+                    client = OpenAI(api_key=oai_key)
+                    stream = client.chat.completions.create(**_openai_kwargs(req_with_memory), stream=True)
+                    for chunk in stream:
+                        if not chunk.choices:
                             continue
-                        payload = line[6:].strip()
-                        if payload == "[DONE]":
-                            break
-                        try:
-                            obj = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
-                        delta = str((((obj.get("choices") or [{}])[0].get("delta") or {}).get("content")) or "")
+                        delta = chunk.choices[0].delta.content or ""
                         if not delta:
                             continue
                         full += delta
                         self._sse_send({"delta": delta})
-                except Exception as exc:
+                except OpenAIError as exc:
                     print(f"OpenAI streaming failed: {type(exc).__name__}: {exc}")
                     full = ""
             if not full and claude_key:
@@ -365,16 +355,17 @@ class Handler(SimpleHTTPRequestHandler):
 
         oai_err = None
         if oai_key:
-            code, payload = _http_json_post(
-                OPENAI,
-                req_with_memory,
-                headers={"Authorization": f"Bearer {oai_key}", "Content-Type": "application/json"},
-            )
-            if code == 200:
+            try:
+                client = OpenAI(api_key=oai_key)
+                completion = client.chat.completions.create(**_openai_kwargs(req_with_memory))
+                payload = completion.model_dump(mode="json")
                 _remember_turn(user_id, req_payload, payload)
                 self._send_json(200, payload)
                 return
-            oai_err = {"code": code, "payload": payload}
+            except OpenAIError as exc:
+                status = getattr(exc, "status_code", 502)
+                detail = getattr(exc, "body", None) or str(exc)
+                oai_err = {"code": status, "payload": {"error": detail}}
 
         if claude_key:
             claude_req = _openai_to_claude_payload(req_with_memory)

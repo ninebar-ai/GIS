@@ -1,0 +1,4 @@
+# serve.py's OpenAI calls go through the official SDK, not raw REST — this is the
+# one third-party dependency in an otherwise stdlib-only server.
+#   pip install -r requirements.txt
+openai>=3.6.0
