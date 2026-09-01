@@ -222,7 +222,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.rstrip("/") != "/api/chat/memory":
-            self.send_error(404)
+            super().do_GET()
             return
         q = urllib.parse.parse_qs(parsed.query or "")
         user_id = str(
