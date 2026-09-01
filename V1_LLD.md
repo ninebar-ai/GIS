@@ -56,7 +56,9 @@ flowchart LR
 ## 3.6 `chat.js`
 - `contextChips(...)`: deterministic quick actions by section.
 - `parseAsk(...)`: maps command text to `recipe|action|help`.
-- `interpret(...)`: local parser first, optional API fallback second.
+- `resolveReferences(...)`: rewrites follow-ups (`that site`, ordinal picks, area/alarm references) to explicit site IDs where possible.
+- `interpretWithStream(...)`: local parser first, then `/api/chat/stream` fallback with progressive deltas.
+- per-user identity + local reference context persistence.
 
 ## 3.7 `neighbors.js`
 - Tier-1 candidate generation and distance/geometry checks.
@@ -68,6 +70,15 @@ flowchart LR
   - `gh.bin`, `dt.bin`
   - `dt_paths.geojson`
   - `ingest-report.json`
+
+## 3.9 `serve.py`
+- static file host + chat API surface:
+  - `POST /api/chat`
+  - `POST /api/chat/stream` (SSE)
+  - `GET /api/chat/memory`
+  - `POST /api/chat/reset`
+- OpenAI primary + Claude fallback.
+- per-user memory merge and turn persistence.
 
 ## 4) Runtime State Model
 ```mermaid
@@ -158,14 +169,17 @@ stateDiagram-v2
   [*] --> FreeText
   StarterClick --> Ask
   FreeText --> Ask
-  Ask --> Interpret
+  Ask --> ResolveRefs
+  ResolveRefs --> Interpret
   Interpret --> LocalParse
   LocalParse --> RecipeIntent
   LocalParse --> ActionIntent
   LocalParse --> HelpIntent
+  HelpIntent --> StreamFallback
+  StreamFallback --> QAIntent
   RecipeIntent --> Repaint
   ActionIntent --> Repaint
-  HelpIntent --> LogOnly
+  QAIntent --> LogOnly
 ```
 
 ## 9) B1 New-Site Neighbor Session
@@ -232,7 +246,8 @@ Notes:
 flowchart TB
   E1["Missing asset file"] --> F1["empty FeatureCollection / zero points fallback"]
   E2["deck overlay attach fail"] --> F2["vector map still renders"]
-  E3["unmatched Copilot prompt"] --> F3["deterministic help response"]
+  E3["unmatched Copilot prompt"] --> F3["streaming LLM fallback via /api/chat/stream"]
+  E5["reference phrase unresolved"] --> F5["fallback to selected/last site or keep context"]
   E4["style reload race"] --> F4["setBasemap style-ready gating"]
 ```
 
@@ -247,5 +262,8 @@ flowchart TB
 - `dtLayer` displays DT line routes + DT points.
 - basemap switch keeps overlays and selections without refresh.
 - Copilot chips trigger deterministic recipe/action transitions.
+- Unknown prompts stream from `/api/chat/stream` without blocking UI.
+- per-user session memory is isolated and resettable via API/UI controls.
+- follow-up references (`that site`, `second one`, area/alarm form) resolve consistently.
 - neighbor session persists and exports auditable trail.
 - vector exports reflect active recipe and include DT route vectors.

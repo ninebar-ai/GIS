@@ -116,7 +116,7 @@ flowchart TB
 - **LOD (P3 / STACK):** dots below zoom 10 · HPBW wedges zoom 10–15 · 3D beams only above zoom 15 and only in 3D.
 - **Co-site:** radial metre-offset so three sectors on one rooftop are honest; spider lines at z ≥ 14.
 - **Colour is scarce (P4):** Groundhog heatmap intensity drops when sector lobes are on.
-- **Copilot (P7):** natural language → recipe or site Q&A (`show planned sites`, `macros in alarm`, `what alarms?`).
+- **Copilot (P7):** floating chat widget with deterministic parser first, then LLM fallback with per-user memory and streaming responses.
 - **Search:** SARF, ECGI, cell, eNB. `/` focuses find.
 - **Measure:** ruler and radius via Turf (not Terra Draw yet).
 - **Export:** GeoJSON, KML, PNG snapshot + recipe URL on the clipboard.
@@ -190,6 +190,137 @@ flowchart TB
   APP <--> HASH["recipe in the URL hash"]
 ```
 
+## Copilot architecture (current)
+
+Copilot now runs as a deterministic-first assistant:
+- First try `parseAsk(...)` for known RF/map commands.
+- If unmatched, stream fallback response from `/api/chat/stream`.
+- Maintain per-user memory and follow-up reference context.
+
+```mermaid
+flowchart LR
+  U["User prompt"] --> ASK["app.js · ask()"]
+  ASK --> RES["chat.js · resolveReferences()"]
+  RES --> PARSE["chat.js · parseAsk()"]
+  PARSE -->|known intent| ACT["recipe/select/neighbors/audit"]
+  PARSE -->|unknown/help| STRM["POST /api/chat/stream (SSE)"]
+  STRM --> DELTA["token deltas"]
+  DELTA --> LOG["live Copilot transcript"]
+  ACT --> MAP["paint() / camera action"]
+```
+
+### Per-user memory and follow-up context
+
+- Browser generates a stable `user_id` and sends it on every request.
+- Server keeps a memory bucket per `user_id`.
+- Memory stores natural user prompts + assistant answers.
+- Reference context stores `lastSiteId` and `lastSiteList` for follow-ups like:
+  - `that site`
+  - `second one`
+  - `one with VSWR alarm`
+  - `one in Shibuya`
+
+```mermaid
+sequenceDiagram
+  participant UI as Browser UI
+  participant CHAT as chat.js
+  participant API as serve.py
+  participant MEM as user memory bucket
+
+  UI->>CHAT: "show failing sites"
+  CHAT->>API: POST /api/chat or /api/chat/stream (X-User-Id)
+  API->>MEM: merge previous turns for user_id
+  API-->>CHAT: intent/streamed response
+  CHAT->>CHAT: update lastSiteId / lastSiteList
+  API->>MEM: persist final turn
+```
+
+### Copilot API surface
+
+| Route | Method | Purpose |
+|------|--------|---------|
+| `/api/chat` | POST | Non-stream JSON completion path |
+| `/api/chat/stream` | POST | SSE stream for unknown prompts |
+| `/api/chat/memory` | GET | Inspect memory for a `user_id` |
+| `/api/chat/reset` | POST | Clear memory for a `user_id` |
+
+## Runtime behavior and safeguards
+
+### Camera behavior (anti-blank-map rules)
+
+- Camera flies only to valid in-region coordinates.
+- If selected/matched site has invalid or missing coordinates, camera is not moved.
+- `flySet(...)` filters invalid points before `fitBounds(...)`.
+- Result: no accidental zoom-out-to-nowhere from bad geometry.
+
+```mermaid
+flowchart TB
+  I["Intent wants camera move"] --> T{"Target coordinates valid?"}
+  T -- yes --> F["flyTo / fitBounds"]
+  T -- no --> K["Keep current camera"]
+  K --> M["Log clear message to Copilot"]
+```
+
+### Basemap switch resilience
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant APP as app.js
+  participant MAP as map.js
+  participant ML as MapLibre
+  U->>APP: switch basemap
+  APP->>MAP: setBasemap(...)
+  MAP->>ML: setStyle(...)
+  MAP->>ML: wait style.load / idle / timeout
+  ML-->>MAP: style ready
+  MAP-->>APP: callback
+  APP->>APP: paint() overlays + selection state
+```
+
+### Snapshot pipeline (PNG fix)
+
+The snapshot path was hardened to avoid black/blank exports:
+- wait for map readiness
+- composite visible canvases (MapLibre + deck.gl) into one output canvas
+- validate non-blank image before final download
+
+```mermaid
+flowchart LR
+  BTN["Snapshot click"] --> IDLE["waitMapIdle()"]
+  IDLE --> CAP["capture map + overlay canvases"]
+  CAP --> CMP["composite into export canvas"]
+  CMP --> VAL{"likelyBlank?"}
+  VAL -- yes --> RETRY["retry with next frame"]
+  VAL -- no --> PNG["download PNG + copy recipe URL"]
+```
+
+## Interaction flows
+
+### Copilot command routing
+
+```mermaid
+stateDiagram-v2
+  [*] --> Prompted
+  Prompted --> Deterministic: parseAsk match
+  Prompted --> Streaming: parseAsk help/unknown
+  Deterministic --> MapUpdate
+  Streaming --> QAResponse
+  MapUpdate --> [*]
+  QAResponse --> [*]
+```
+
+### B1 neighbor workflow
+
+```mermaid
+flowchart LR
+  SEL["Select site / drop candidate pin"] --> T1["Tier-1 auto proposal"]
+  T1 --> ADJ["Manual add/remove sectors"]
+  ADJ --> EVT["appendEvent audit trail"]
+  EVT --> SAVE["persist session"]
+  SAVE --> EXP["Export audit JSON/CSV"]
+```
+
 ## How to run
 
 No npm install. The app is static files plus a JSON inventory.
@@ -205,7 +336,13 @@ python serve.py
 
 Open [http://127.0.0.1:8765/](http://127.0.0.1:8765/).
 
-`serve.py` serves the static files **and** proxies Copilot's OpenAI fallback at `/api/chat`. Plain `python -m http.server 8765` also works for browsing the map, but the Copilot key field will fail with a 404 on that server — use `serve.py` if you want the OpenAI fallback to work.
+`serve.py` serves the static files and Copilot backend routes:
+- `POST /api/chat` — JSON completion fallback path.
+- `POST /api/chat/stream` — SSE streaming path for unknown prompts.
+- `GET /api/chat/memory` — inspect per-user memory.
+- `POST /api/chat/reset` — clear per-user memory.
+
+Plain `python -m http.server 8765` still works for map-only browsing, but Copilot backend routes require `serve.py`.
 
 Do **not** open `index.html` as a `file://` URL — ES modules and `fetch('./inventory.json')` need a local server.
 
@@ -256,14 +393,14 @@ Cap on packed points is 2e6. Tokyo bbox only. TKY-* sample rows from the parent 
 ```
 ns-qaw-a/
   index.html          shell, CDNs, 2D/3D, clock, copilot
-  styles.css          Mapsheet Zero dark tokens
+  styles.css          Mapsheet Zero-inspired light theme tokens + Copilot widget styling
   app.js              boot, recipe hash, search, copilot wiring
   map.js              MapLibre style, LOD layers, feature-state, 2D/3D
   heavy.js            deck.gl overlay + packed .bin reader
   lobes.js            gain() HPBW polygons, co-site offset
   filters.js          recipe, facets, empty-count reasons
-  chat.js             NL → recipe / site answers
-  tools.js            search, measure, import, GeoJSON/KML/PNG
+  chat.js             NL parser + reference resolver + memory/stream chat client
+  tools.js            search, measure, import, GeoJSON/KML/PNG (robust snapshot composition)
   ingest.py           cell plan + annotated + tok-fm + GH/DT
   inventory.json      published sites/cells + clock + provenance
   gh.bin / dt.bin     f32le triplets: lng, lat, rsrp
@@ -280,6 +417,52 @@ These are in the brief or `STACK.md` and are **not** in this prototype:
 - Terra Draw (ruler/radius is Turf only).
 - PMTiles / country-scale vector tiles.
 - QGIS-style reorderable opacity tree and map↔attribute table for the full inventory.
+
+## Known limitations (current build)
+
+- Copilot backend memory is process-local (in-memory in `serve.py`), so restarting server clears backend memory.
+- Reference resolver supports common follow-up forms, but ambiguous natural language may still fall back to generic QA.
+- SSE streaming is primary for unknown prompts; provider fallback can return as one chunk depending on upstream response mode.
+- Area phrase matching (`one in <area>`) depends on text presence in site metadata fields from ingest.
+- Alarm phrase matching (`one with <alarm>`) depends on normalized alarm `problem` text in inventory.
+- GPU measurement exports remain visual-only in PNG; GeoJSON/KML exports include vector layers and DT routes, not full GH/DT point clouds.
+
+## QA checklist (release sanity)
+
+Run this after `python serve.py` and open `http://127.0.0.1:8765/`.
+
+### A) Core map + camera
+
+- [ ] Basemap switch (`Plan` ↔ `Satellite` ↔ `Terrain`) keeps overlays and selection without refresh.
+- [ ] Selecting a site highlights it and opens contextual card data.
+- [ ] Invalid target geometry does not zoom out to blank world; view remains stable with an explanatory Copilot message.
+- [ ] `daily drive test` shows DT routes + points and focuses near valid context.
+
+### B) Copilot interaction
+
+- [ ] Typed prompt appears immediately in transcript (no one-step lag).
+- [ ] Unknown prompt streams progressively (token-like) instead of appearing only at end.
+- [ ] Follow-up references resolve correctly:
+  - [ ] `that site`
+  - [ ] `second one`
+  - [ ] `last 3 sites`
+  - [ ] `one with VSWR alarm`
+  - [ ] `one in Shibuya` (or other area text available in ingest)
+- [ ] `show memory` returns count; `reset memory` clears server-side session for current user.
+- [ ] `Clear` clears local visible transcript; `Reset` clears backend memory context.
+
+### C) Export + evidence
+
+- [ ] Snapshot PNG is non-blank and includes active map state.
+- [ ] Snapshot action copies recipe URL to clipboard.
+- [ ] GeoJSON/KML export succeeds and includes enabled vector layers (including DT routes when enabled).
+- [ ] Neighbor session audit exports JSON/CSV after add/remove edits.
+
+### D) Keyboard + UX
+
+- [ ] `/` focuses search, `f` toggles Layers, `c` toggles Copilot, `Esc` clears/close state.
+- [ ] Copilot layout remains usable at desktop and mobile widths (header controls, prompt chips, composer).
+- [ ] Copilot status indicator transitions: `Ready` → `Thinking...` → `Responding...` → `Ready`.
 
 ## Constraints we kept
 

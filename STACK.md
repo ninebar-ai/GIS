@@ -12,6 +12,7 @@ This is the stack `ns-qaw-a` is built on, and the stack later product work shoul
 | Datum | WGS84 / EPSG:4326 | Every source in this ingest already ships WGS84; no conversion layer exists yet — a source in JGD2000 or old Tokyo Datum would need one added before it's trusted. |
 | 2D basemap | Muted Esri World Imagery | Reliable to load, doesn't fight the sector wedges for attention (Colour is a scarce resource — P4). |
 | 3D | MapLibre terrain (raster-dem) + OpenFreeMap building extrusion | Stand-ins for GSI elevation / PLATEAU city tiles, not yet wired to the official Japanese sources. |
+| Copilot backend | `serve.py` local API (`/api/chat`, `/api/chat/stream`, `/api/chat/memory`, `/api/chat/reset`) | Keeps keys server-side, supports OpenAI→Claude fallback, per-user memory, and streaming UX. |
 
 ## Explicitly not used
 

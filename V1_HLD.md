@@ -14,14 +14,16 @@ V1 delivery scope:
 - **Deterministic controls:** every UI command maps to a concrete recipe/session mutation.
 - **Low-latency rendering:** vector for structured entities, GPU overlays for dense points.
 - **Traceable actions:** site/neighbor decisions must be exportable and replayable.
+- **Context-safe Copilot:** follow-up prompts must resolve deterministically to concrete site IDs where possible.
 
 ## 3) Scope and Boundaries
 ### In Scope
 - Filters, layer toggles, site and sector rendering.
 - Basemap switching and 2D/3D mode switch.
 - Search, ruler/radius, import/export/snapshot.
-- Copilot starter chips + parser-driven commands.
+- Copilot starter chips + parser-driven commands + streamed fallback.
 - Neighbor session lifecycle (auto-propose, manual adjust, audit export).
+- Per-user Copilot memory/session continuity and reset/inspect controls.
 
 ### Out of Scope
 - B2+ KPI timeline analytics and alarm blast-radius scoring.
@@ -138,14 +140,27 @@ This design matches the current anti-regression fix for disappearing overlays on
 flowchart LR
   CHIP["Starter chip click"] --> ASK["ask(q)"]
   FREE["Manual prompt"] --> ASK
-  ASK --> INT["interpret(text, inv, selected)"]
-  INT --> PARSE["parseAsk(...) local deterministic parser"]
+  ASK --> INT["interpretWithStream(text, inv, selected)"]
+  INT --> RESOLVE["Reference resolver\n(that site / second one / area / alarm)"]
+  RESOLVE --> PARSE["parseAsk(...) local deterministic parser"]
   PARSE -->|intent recipe| REC["state.recipe update"]
   PARSE -->|intent action| ACT["selection/neighbor action"]
-  PARSE -->|fallback| HELP["help narration"]
+  PARSE -->|help/unknown| LLM["/api/chat/stream via serve.py"]
+  LLM --> HELP["streamed QA narration"]
   REC --> PAINT["paint()"]
   ACT --> PAINT
   HELP --> LOG["Copilot log"]
+```
+
+### 10.1 Copilot Session Isolation
+```mermaid
+flowchart TB
+  U["Browser user"] --> ID["stable user_id (localStorage)"]
+  ID --> API["serve.py"]
+  API --> MEM["in-memory session bucket per user_id"]
+  MEM --> CHAT["/api/chat + /api/chat/stream context merge"]
+  U --> CTRL["Clear / Reset memory controls"]
+  CTRL --> API
 ```
 
 ## 11) B1 Workflow Architecture
@@ -164,6 +179,7 @@ flowchart TB
 - **Consistency:** terminology and commands stay aligned (`Copilot`, `Layers`, `New site`).
 - **Reliability:** basemap change does not require full refresh.
 - **Auditability:** neighbor decisions are reproducible from exported trail.
+- **Context continuity:** Copilot preserves per-user context across follow-up prompts.
 
 ## 13) Risks and Controls
 ```mermaid
@@ -179,4 +195,6 @@ flowchart TB
 - `dtLayer` shows DT points and DT routes together.
 - basemap switch preserves visible layers and selection context.
 - Copilot starters route to intended section/action consistently.
+- Unknown Copilot prompts stream progressive responses.
+- Follow-up phrases (`that site`, `second one`, `one with VSWR alarm`) resolve to stable context targets.
 - Tier-1 audit export yields deterministic JSON/CSV traces.
