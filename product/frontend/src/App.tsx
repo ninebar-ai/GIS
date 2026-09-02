@@ -1,11 +1,8 @@
 import { useEffect } from 'react'
-import { FilterDrawer } from './ui/FilterDrawer'
-import { useWorkbench } from './workbench/useWorkbench'
-import { applyRecipeChange, bootLegacyApp } from './legacyApp'
+import { FilterDrawerHost } from './ui/FilterDrawer'
+import { bootLegacyApp } from './legacyApp'
 
 export function App() {
-  const { state } = useWorkbench()
-
   useEffect(() => {
     void bootLegacyApp()
   }, [])
@@ -84,9 +81,7 @@ export function App() {
             <button type="button" className="icon-btn" id="rail-x">×</button>
           </header>
           <div className="facets" id="facets">
-            {state.inv ? (
-              <FilterDrawer inv={state.inv} recipe={state.recipe} onChange={applyRecipeChange} />
-            ) : null}
+            <FilterDrawerHost />
           </div>
         </aside>
 

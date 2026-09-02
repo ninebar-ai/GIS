@@ -1583,8 +1583,11 @@ async function boot() {
 let bootPromise = null
 
 export function bootLegacyApp() {
-  if (bootPromise) return bootPromise
+  const mapEl = document.getElementById('map')
+  const live = state.map?.getContainer?.()
+  if (bootPromise && live && mapEl && live === mapEl) return bootPromise
   bootPromise = boot().catch((err) => {
+    bootPromise = null
     document.body.innerHTML = `<p style="padding:24px;color:#eee">Failed to load inventory.json. Run product/db/ingest.py. ${err}</p>`
     throw err
   })

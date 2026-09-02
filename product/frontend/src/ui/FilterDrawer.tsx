@@ -1,5 +1,7 @@
 import { v } from '../lobes'
 import { EMPTY_REASON, nPts, toggleRecipePill } from '../filters'
+import { useWorkbench } from '../workbench/useWorkbench'
+import { applyRecipeChange } from '../legacyApp'
 
 function Pill({ recipe, facetKey, val, n, onToggle }: { recipe: any; facetKey: string; val: string; n: number; onToggle: (key: string, val: string) => void }) {
   const on = Array.isArray(recipe[facetKey]) ? recipe[facetKey].includes(val) : recipe[facetKey] === val
@@ -144,4 +146,11 @@ export function FilterDrawer({ inv, recipe, onChange }: { inv: any; recipe: any;
       </section>
     </>
   )
+}
+
+/** Subscribe here only — never from App — so paint() cannot wipe imperative chrome. */
+export function FilterDrawerHost() {
+  const { state } = useWorkbench()
+  if (!state.inv) return null
+  return <FilterDrawer inv={state.inv} recipe={state.recipe} onChange={applyRecipeChange} />
 }
