@@ -2,7 +2,7 @@
 
 A geospatial workbench for visualizing and analyzing a radio access network (RAN) around Tokyo — cell sites, coverage measurements, drive-test traces — with a natural-language Copilot built on top of the map.
 
-The repo tracks only the runtime code and the data artifacts needed to run it: `product/` and this README. Docs, planning records, and process templates exist locally but are gitignored (see `.gitignore`).
+The repo tracks only the runtime code and the data artifacts needed to run it: `product/` and this README. Docs, planning records, and process templates exist locally under `ignored/` but are gitignored (see `.gitignore`).
 
 ## Layout
 

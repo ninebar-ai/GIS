@@ -6,25 +6,8 @@ data/
 *.pdf
 ~$*
 
-# ---- external kit bundle (reference only) ----
-engineering-kit/
-junk/
-
-# ---- repo docs/process/planning: kept locally, not tracked ----
-/AGENTS.md
-/APPROACH.md
-/CHANGELOG.md
-/CONTRIBUTING.md
-/SECURITY.md
-/USAGE.md
-/assets/
-/docs/
-/process/
-/prompts/
-/rules/
-/templates/
-/.planning/
-/.github/
+# ---- non-runtime docs/process/planning/reference material: kept locally, not tracked ----
+/ignored/
 
 # ---- scratch generators & diagram folders ----
 _*.py
