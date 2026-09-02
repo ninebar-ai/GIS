@@ -8,8 +8,23 @@ data/
 
 # ---- external kit bundle (reference only) ----
 engineering-kit/
-junk/*
-!junk/README.md
+junk/
+
+# ---- repo docs/process/planning: kept locally, not tracked ----
+/AGENTS.md
+/APPROACH.md
+/CHANGELOG.md
+/CONTRIBUTING.md
+/SECURITY.md
+/USAGE.md
+/assets/
+/docs/
+/process/
+/prompts/
+/rules/
+/templates/
+/.planning/
+/.github/
 
 # ---- scratch generators & diagram folders ----
 _*.py
