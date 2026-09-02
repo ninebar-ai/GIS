@@ -6,12 +6,17 @@ data/
 *.pdf
 ~$*
 
+# ---- external kit bundle (reference only) ----
+engineering-kit/
+junk/*
+!junk/README.md
+
 # ---- scratch generators & diagram folders ----
 _*.py
 _diagrams/
 _diagrams_mz/
 
-# ---- other workspace HTML dumps (keep mapsheetzero.html) ----
+# ---- other workspace HTML dumps ----
 NineOne GIS Workspace.html
 NineOne_Telco_GIS_Map_and_Tech_Stack.html
 Telecom GIS Workspace.html
@@ -35,12 +40,16 @@ env/
 .mypy_cache/
 .ruff_cache/
 
-# ---- Node (if added later) ----
+# ---- Node ----
 node_modules/
 npm-debug.log*
 yarn-error.log*
 dist/
 .turbo/
+.vite/
+coverage/
+*.tsbuildinfo
+*.local
 
 # ---- OS ----
 .DS_Store

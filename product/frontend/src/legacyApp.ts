@@ -1,32 +1,41 @@
-import { v, buildGeo, buildPlanned } from './lobes.js'
-import { defaultRecipe, applyRecipe, counts, chipList, dismissChip, renderFacets } from './filters.js'
-import { createMap, dressAndPaint, setMeasureData, setUserData, setProbeData, queryHit, setBasemap, visibleLayers, applyView, setSelectedState } from './map.js?v=27'
-import { searchHits, measureDistance, measureRadius, layersToGeoJSON, layersToKml, download, parseImport, snapshotCanvas, downloadPng } from './tools.js?v=27'
-import { interpretWithStream, contextChips, getUserId } from './chat.js?v=37'
-import { loadPacked, pickPoint, describePick } from './heavy.js'
-import { buildHoles } from './holes.js'
-import { tier1Candidates, tier1CandidatesAt, monitoredIds, neighborLines, candidateFc, PIN_ID, sessionKey, persistNeighbors, recallNeighbors, applyRecall, appendEvent, auditPayload, auditCsv } from './neighbors.js'
+import maplibregl from 'maplibre-gl'
+import { v, buildGeo, buildPlanned } from './lobes'
+import { defaultRecipe, applyRecipe, counts, chipList, dismissChip, sanitizeRecipe } from './filters'
+import { createMap, dressAndPaint, setMeasureData, setUserData, setProbeData, queryHit, setBasemap, visibleLayers, applyView, setSelectedState, setSectorData, DARK_BASEMAPS } from './map'
+import { searchHits, measureDistance, measureRadius, layersToGeoJSON, layersToKml, download, parseImport, snapshotCanvas, downloadPng } from './tools'
+import { interpretWithStream, contextChips, getUserId, scopeEcho, recordFeedback, ensureFly } from './chat'
+import { pickPoint, describePick, COLOR_STOPS } from './heavy'
+import { loadInventory, loadHeavy, loadDtPaths, tileUrls, source as dataSource } from './data'
+import { buildHoles } from './holes'
+import { distanceM, bearingDeg, tier1Candidates, tier1CandidatesAt, monitoredIds, neighborLines, candidateFc, PIN_ID, sessionKey, persistNeighbors, recallNeighbors, applyRecall, appendEvent, auditPayload, auditCsv, formatNeighborNarrate } from './neighbors'
+import { state, notify, askQueue, setAskQueue, sectorFrame, setSectorFrame } from './workbench/state'
 
-const $ = (id) => document.getElementById(id)
+export { state, subscribe, getRev, LAYER_RAIL } from './workbench/state'
 
-const state = {
-  inv: null,
-  recipe: defaultRecipe(),
-  selected: null,
-  section: null,
-  neighbors: null,
-  tool: 'pan',
-  measurePts: [],
-  userFc: { type: 'FeatureCollection', features: [] },
-  geo: null,
-  map: null,
-  voiceOut: false,
-  cursor: null,
-  frameMs: null,
-  dtPaths: { type: 'FeatureCollection', features: [] },
-  dtPreview: { type: 'FeatureCollection', features: [] },
-  voiceGreeted: false,
-  chatBusy: false,
+const $ = (id: string) => document.getElementById(id) as HTMLElement & HTMLInputElement & HTMLFormElement & Record<string, any>
+
+function stopSpeaking() {
+  try { window.speechSynthesis?.cancel() } catch { /* */ }
+}
+
+function stopVoiceCapture() {
+  try { state.voiceRec?.stop() } catch { /* */ }
+  $('btn-mic')?.classList.remove('on')
+}
+
+function enqueueAsk(q: string, opts: any = {}) {
+  const text = (q || '').trim()
+  if (!text) return
+  stopSpeaking()
+  if (!opts.voice) {
+    state.voiceOut = false
+    stopVoiceCapture()
+  }
+  setCopilotOpen(true)
+  setAskQueue(askQueue.catch(() => {}).then(() => ask(text, opts)).catch((err: any) => {
+    logMsg(`Copilot error: ${err?.message || String(err)}`, 'bot', { provenance: 'degraded', route: 'error' })
+    setChatBusy(false)
+  }))
 }
 
 const CHAT_LOG_MAX = 80
@@ -79,6 +88,11 @@ function loadHash() {
   } catch { return null }
 }
 
+/** Dark ground under the vectors means the status palette flips (see lobes.js). */
+function onDarkBasemap() {
+  return DARK_BASEMAPS.has($('basemap')?.value || 'dark')
+}
+
 function filtered() {
   return applyRecipe(state.inv, state.recipe)
 }
@@ -128,8 +142,7 @@ function paint() {
   const bandPin = state.recipe.band.length === 1 ? state.recipe.band[0] : null
   const zoom = state.map?.getZoom?.() ?? 13
   const bounds = state.map?.getBounds?.() ?? null
-  state.geo = buildGeo(sites, cells, { bandPin, selectedId: state.selected, bounds, zoom, keepIds: neighborIds })
-  state.geo.plannedFc = buildPlanned(state.inv.sites)
+  state.geo = { ...buildGeo(sites, cells, { bandPin, selectedId: state.selected, bounds, zoom, keepIds: neighborIds, dark: onDarkBasemap() }), plannedFc: buildPlanned(state.inv.sites) }
   if (state.map) {
     dressAndPaint(state.map, state.geo, state.recipe, {
       gh: state.heavy?.gh,
@@ -138,6 +151,7 @@ function paint() {
       dtPreview: state.dtPreview,
       selectedId: state.selected,
       holes: state.holesFc,
+      tileUrls: tileUrls(),
       neighborIds,
       neighborLines: nbLines,
       candidateFc: pinFc,
@@ -145,23 +159,220 @@ function paint() {
   }
   const c = counts(state.inv, state.recipe)
   const gpu = (state.heavy?.gh?.n || c.gh) + (state.heavy?.dt?.n || c.dt)
-  $('counts').textContent = `${c.sites} sites · ${c.cells} cells · ${c.alarm} in alarm · GPU ${gpu.toLocaleString()}`
-  renderFacets($('facets'), state.inv, state.recipe, (next) => {
-    state.recipe = next
-    paint()
-    recipeHash()
-  })
+  const via = dataSource.tiles ? 'PostGIS tiles' : 'files'
+  state.hud.counts = `${c.sites} sites · ${c.cells} cells · ${c.alarm} in alarm · ${gpu.toLocaleString()} pts · ${via}`
+  state.hud.countsTitle = dataSource.reason || `Serving from ${via}`
+  syncLayerRail()
+  renderLegend()
+  renderPicker()
   renderContextStrip()
   renderChips()
   renderCard()
+  renderCopilotScope()
   updateHud()
   recipeHash()
+  notify()
+}
+
+export function applyRecipeChange(next: any) {
+  state.recipe = next
+  paint()
+}
+
+/**
+ * Rebuild sector geometry for the current zoom and push only the three sector
+ * sources. Lobe reach is constant on screen (lobes.js screenReachDeg), so the
+ * polygons change as the camera zooms — but paint() would rebuild the facets
+ * drawer, chips, card and URL hash too, which is far too much for a zoom frame.
+ */
+function repaintSectors() {
+  if (!state.map || !state.inv || !state.geo) return
+  const neighborIds = monitoredIds(state.neighbors)
+  const base = filtered()
+  const { sites, cells } = withNeighbors(base.sites, base.cells, neighborIds)
+  const bandPin = state.recipe.band.length === 1 ? state.recipe.band[0] : null
+  const next: any = buildGeo(sites, cells, {
+    bandPin,
+    selectedId: state.selected,
+    bounds: state.map.getBounds?.() ?? null,
+    zoom: state.map.getZoom?.() ?? 13,
+    keepIds: neighborIds,
+    dark: onDarkBasemap(),
+  })
+  next.plannedFc = state.geo?.plannedFc
+  state.geo = next
+  setSectorData(state.map, state.geo, state.recipe)
+}
+
+/** One sector rebuild per frame while the camera is moving, never more. */
+function queueSectorRepaint() {
+  if (sectorFrame) return
+  setSectorFrame(requestAnimationFrame(() => {
+    setSectorFrame(0)
+    try { repaintSectors() } catch (err) { console.warn('repaintSectors', err) }
+  }))
+}
+
+/**
+ * Windy-style layer rail. vocLayer is deliberately absent — it has a recipe key
+ * and a drawer checkbox but no renderer in map.js or heavy.js, and ingest drops
+ * the points, so it would be a switch that does nothing.
+ */
+const LAYER_RAIL = [
+  { key: 'sectorsLayer', glyph: '◗', tag: 'Sect', label: 'Sector lobes' },
+  { key: 'spiderLayer', glyph: '⁂', tag: 'Cosi', label: 'Co-site spider (z≥14)' },
+  { key: 'plannedLayer', glyph: '◎', tag: 'Plan', label: 'Planned sites' },
+  { key: 'ghLayer', glyph: '▩', tag: 'GH', label: 'Groundhog RSRP' },
+  { key: 'dtLayer', glyph: '⟿', tag: 'DT', label: 'Drive test' },
+  { key: 'holesLayer', glyph: '⬡', tag: 'Hole', label: 'Coverage holes' },
+  { key: 'ghContourLayer', glyph: '◍', tag: 'Cont', label: 'Groundhog contour' },
+]
+
+function bindLayerRail() {
+  const rail = $('layer-rail')
+  if (!rail) return
+  rail.innerHTML = LAYER_RAIL.map((l) => `
+    <button type="button" class="layer-btn" data-layer="${l.key}" title="${l.label}" aria-pressed="false">
+      <span class="glyph" aria-hidden="true">${l.glyph}</span><span class="tag">${l.tag}</span>
+    </button>`).join('')
+  rail.querySelectorAll('[data-layer]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.layer
+      state.recipe[key] = !state.recipe[key]
+      // Same path the drawer checkboxes use, so renderFacets() inside paint()
+      // keeps the two controls in sync with no extra wiring.
+      paint()
+      recipeHash()
+    })
+  })
+  syncLayerRail()
+}
+
+function syncLayerRail() {
+  document.querySelectorAll('#layer-rail [data-layer]').forEach((btn) => {
+    const on = !!state.recipe[btn.dataset.layer]
+    btn.classList.toggle('on', on)
+    btn.setAttribute('aria-pressed', String(on))
+  })
+}
+
+/**
+ * RSRP scale, built from heavy.js COLOR_STOPS so the legend and the GPU ramp
+ * cannot drift apart. Only shown while a layer that uses it is on, and it names
+ * its source and window — the build checklist asks for both.
+ */
+function renderLegend() {
+  const el = $('legend')
+  if (!el) return
+  const r = state.recipe
+  const on = r.ghLayer || r.dtLayer || r.ghContourLayer || r.holesLayer
+  el.hidden = !on
+  if (!on) return
+  const lo = COLOR_STOPS[0][0]
+  const hi = COLOR_STOPS[COLOR_STOPS.length - 1][0]
+  const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`
+  const ramp = COLOR_STOPS
+    .map(([val, c]) => `${rgb(c)} ${(((val - lo) / (hi - lo)) * 100).toFixed(1)}%`)
+    .join(', ')
+  const sources = []
+  if (r.ghLayer || r.ghContourLayer || r.holesLayer) sources.push(`Groundhog ${nFmt(state.heavy?.gh?.n)}`)
+  if (r.dtLayer) sources.push(`drive test ${nFmt(state.heavy?.dt?.n)}`)
+  el.innerHTML = `
+    <div class="legend-head u-mono">RSRP dBm</div>
+    <div class="legend-ramp" style="background: linear-gradient(90deg, ${ramp})"></div>
+    <div class="legend-ticks">${COLOR_STOPS.map(([val]) => `<span>${val}</span>`).join('')}</div>
+    <div class="legend-foot u-mono">${sources.join(' · ')}${state.inv?.clock?.t ? ` · ${state.inv.clock.t.slice(0, 16)}` : ''}</div>`
+}
+
+const nFmt = (n) => Number(n || 0).toLocaleString()
+
+/**
+ * Windy-style picker: a puck pinned to a ground point that keeps reporting what
+ * is there as you pan and zoom, rather than the transient hover readout. Its
+ * numbers come from the same arrays the layers draw, never from an estimate.
+ */
+function nearestSample(lng, lat, packed, maxM = 260) {
+  const n = Number(packed?.n || 0)
+  if (!n || !packed.positions) return null
+  const coslat = Math.cos((lat * Math.PI) / 180)
+  let bestI = -1
+  let bestD2 = Infinity
+  for (let i = 0; i < n; i++) {
+    const dLng = (packed.positions[i * 3] - lng) * coslat
+    const dLat = packed.positions[i * 3 + 1] - lat
+    const d2 = dLng * dLng + dLat * dLat
+    if (d2 < bestD2) { bestD2 = d2; bestI = i }
+  }
+  if (bestI < 0) return null
+  const metres = Math.sqrt(bestD2) * 111320
+  if (metres > maxM) return null
+  return { rsrp: packed.rsrp[bestI], metres }
+}
+
+function nearestSiteTo(lng, lat) {
+  let best = null
+  for (const s of state.inv?.sites || []) {
+    const sLng = Number(v(s.lng))
+    const sLat = Number(v(s.lat))
+    if (!validJapanCoord(sLng, sLat)) continue
+    const d = distanceM(lat, lng, sLat, sLng)
+    if (!best || d < best.metres) best = { id: s.site_id, metres: d, bearing: bearingDeg(lat, lng, sLat, sLng), status: v(s.status), inAlarm: !!s.in_alarm }
+  }
+  return best
+}
+
+function setPicker(lngLat) {
+  state.picker = lngLat ? { lng: lngLat.lng, lat: lngLat.lat } : null
+  renderPicker()
+}
+
+function renderPicker() {
+  const el = $('picker')
+  if (!el) return
+  const p = state.picker
+  if (!p || !state.map) { el.hidden = true; return }
+  const pt = state.map.project([p.lng, p.lat])
+  // Hide rather than draw off-canvas when the pinned point leaves the view.
+  const c = state.map.getCanvas()
+  if (pt.x < -40 || pt.y < -40 || pt.x > c.clientWidth + 40 || pt.y > c.clientHeight + 40) {
+    el.hidden = true
+    return
+  }
+  el.hidden = false
+  el.style.left = `${pt.x}px`
+  el.style.top = `${pt.y}px`
+
+  const rows = []
+  const site = nearestSiteTo(p.lng, p.lat)
+  if (site) {
+    rows.push(`<div class="pick-row"><b>${site.id}</b><span>${Math.round(site.metres)} m · ${Math.round(site.bearing)}°</span></div>`)
+    rows.push(`<div class="pick-row u-mono"><span>${site.status}${site.inAlarm ? ' · in alarm' : ''}</span></div>`)
+  }
+  const gh = state.recipe.ghLayer || state.recipe.ghContourLayer || state.recipe.holesLayer
+    ? nearestSample(p.lng, p.lat, state.heavy?.gh) : null
+  const dt = state.recipe.dtLayer ? nearestSample(p.lng, p.lat, state.heavy?.dt) : null
+  if (gh) rows.push(`<div class="pick-row"><span>GH</span><b>${gh.rsrp.toFixed(1)} dBm</b><span class="u-mono">${Math.round(gh.metres)} m</span></div>`)
+  if (dt) rows.push(`<div class="pick-row"><span>DT</span><b>${dt.rsrp.toFixed(1)} dBm</b><span class="u-mono">${Math.round(dt.metres)} m</span></div>`)
+  if (!gh && !dt && (state.recipe.ghLayer || state.recipe.dtLayer)) {
+    rows.push('<div class="pick-row u-mono"><span>no sample within 260 m</span></div>')
+  }
+
+  el.innerHTML = `
+    <button type="button" class="pick-x" id="pick-x" aria-label="Close picker">×</button>
+    <div class="pick-coord u-mono">${p.lat.toFixed(5)} N · ${p.lng.toFixed(5)} E</div>
+    ${rows.join('')}`
+  el.querySelector('#pick-x')?.addEventListener('click', () => setPicker(null))
 }
 
 function renderContextStrip() {
   const label = $('context-label')
   const box = $('context-actions')
+  const strip = $('context-strip')
   if (!label || !box) return
+  // It floats over the map now, so it only earns its space when there is real
+  // context. New site / Snapshot / Layers already live in the bar and the rail.
+  if (strip) strip.hidden = !state.selected && !state.section
+  if (strip?.hidden) return
   let context = 'overview'
   if (state.section === 'neighbors') context = 'neighbor session'
   else if (state.selected) context = 'site selection'
@@ -204,6 +415,12 @@ function renderChips() {
   })
 }
 
+function renderCopilotScope() {
+  const el = $('copilot-scope')
+  if (!el || !state.inv) return
+  el.textContent = `Scope · ${scopeEcho(state.inv, state.selected, state.section)}`
+}
+
 function renderStarters() {
   const chips = contextChips({ section: state.section, selected: state.selected, inv: state.inv })
   $('starters').innerHTML = chips.map((s) => {
@@ -213,7 +430,7 @@ function renderStarters() {
     return `<button type="button" class="starter" data-ask="${ask}"><span class="starter-label">${label}</span>${hint}</button>`
   }).join('')
   $('starters').querySelectorAll('button').forEach((b) => {
-    b.onclick = () => ask(b.dataset.ask)
+    b.onclick = () => enqueueAsk(b.dataset.ask)
   })
 }
 
@@ -375,7 +592,7 @@ function validJapanCoord(lng, lat) {
   return Number.isFinite(lng) && Number.isFinite(lat) && lng >= 122 && lng <= 154 && lat >= 20 && lat <= 47
 }
 
-function flyToSite(id) {
+function flyToSite(id, minZoom = 15) {
   const s = siteOf(id)
   if (!s || !state.map) return
   const lng = Number(v(s.lng))
@@ -387,20 +604,72 @@ function flyToSite(id) {
   const three = state.recipe.view === '3d'
   state.map.flyTo({
     center: [lng, lat],
-    zoom: Math.max(state.map.getZoom(), three ? 15.2 : 14.6),
+    zoom: three ? Math.max(minZoom, 15.2) : minZoom,
     pitch: three ? 68 : 0,
     duration: 900,
   })
 }
 
-function flySet(pred) {
-  const pts = state.inv.sites
-    .filter(pred)
-    .map((s) => [Number(v(s.lng)), Number(v(s.lat))])
+function flySet(pred, { minZoom = 14, maxZoom = 16 } = {}) {
+  if (!state.map) return
+  const sites = state.inv.sites.filter(pred)
+  const pts = sites
+    .map((s) => [Number(v(s.lng)), Number(v(s.lat)), s.site_id])
     .filter((p) => validJapanCoord(p[0], p[1]))
   if (!pts.length) return
-  const b = pts.reduce((acc, p) => acc.extend(p), new maplibregl.LngLatBounds(pts[0], pts[0]))
-  state.map.fitBounds(b, { padding: 90, duration: 900, maxZoom: 15, pitch: state.recipe.view === '3d' ? 58 : 0 })
+  if (pts.length === 1) {
+    flyToSite(pts[0][2], minZoom)
+    return
+  }
+  const b = pts.reduce(
+    (acc, p) => acc.extend([p[0], p[1]]),
+    new maplibregl.LngLatBounds([pts[0][0], pts[0][1]], [pts[0][0], pts[0][1]]),
+  )
+  state.map.fitBounds(b, {
+    padding: 100,
+    duration: 900,
+    maxZoom,
+    minZoom,
+    pitch: state.recipe.view === '3d' ? 58 : 0,
+  })
+}
+
+/** Run a camera move once the map is ready (never rely on a load event that already fired). */
+function runCameraAction(fn) {
+  if (!state.map || typeof fn !== 'function') return
+  let ran = false
+  const go = () => {
+    if (ran) return
+    ran = true
+    try { state.map.resize() } catch { /* */ }
+    try { fn() } catch { /* */ }
+  }
+  if (state.map.loaded?.()) {
+    requestAnimationFrame(() => requestAnimationFrame(go))
+    state.map.once('idle', go)
+    setTimeout(go, 500)
+  } else {
+    state.map.once('load', go)
+    setTimeout(go, 1200)
+  }
+}
+
+function executeFly(intent) {
+  if (!intent?.fly || !state.map) return
+  if (intent.fly === 'planned') flySet((s) => v(s.status) === 'planned')
+  else if (intent.fly === 'alarms') {
+    const alarmSites = state.inv.sites.filter((s) => s.in_alarm)
+    if (alarmSites.length) {
+      state.selected = intent.select || alarmSites[0].site_id
+      if (state.map) setSelectedState(state.map, state.selected)
+      renderCard()
+    }
+    flySet((s) => s.in_alarm, { minZoom: 14, maxZoom: 16 })
+  } else if (intent.fly === 'select') flyToSite(state.selected)
+  else if (intent.fly === 'dt' || intent.fly === 'dt-focus') flyDtFocus(state.heavy?.dt?.bbox || state.inv.drive_test?.bbox)
+  else if (intent.fly === 'dt-near') flyDtNearSelection()
+  else if (intent.fly === 'gh') flyBbox(state.heavy?.gh?.bbox || state.inv.groundhog?.bbox)
+  else if (intent.fly === 'cluster') cinematic()
 }
 
 function flyBbox(b) {
@@ -490,9 +759,10 @@ function clearNeighbors() {
   state.neighbors = null
   if (state.section === 'neighbors') state.section = null
   if (wasPin && state.selected === PIN_ID) state.selected = null
+  hideMeasureBar()
 }
 
-function bootNeighborSession({ kind, targetId, lat, lng, autoIds, restored }) {
+function bootNeighborSession({ kind, targetId, lat, lng, autoIds, restored }: any) {
   const recalled = recallNeighbors(kind === 'pin'
     ? sessionKey({ kind: 'pin', lat, lng })
     : sessionKey({ kind: 'site', targetId }))
@@ -503,9 +773,11 @@ function bootNeighborSession({ kind, targetId, lat, lng, autoIds, restored }) {
   persistNeighbors(state.neighbors)
   state.section = 'neighbors'
   state.selected = targetId
-  state.recipe = { ...state.recipe, sectorsLayer: true }
+  state.recipe = sanitizeRecipe({ ...defaultRecipe(), sectorsLayer: true, view: state.recipe.view }, state.inv)
   paint()
   renderStarters()
+  if (kind === 'pin') showPinMeasureBar(lat, lng)
+  else hideMeasureBar()
 }
 
 function startNeighbors(siteId) {
@@ -577,12 +849,12 @@ function exportAudit(kind) {
   persistNeighbors(state.neighbors)
   const payload = auditPayload(state.inv, state.neighbors)
   const stamp = (payload.key || 'nb').replace(/[^a-zA-Z0-9._-]+/g, '_')
-  if (kind === 'csv') download(`ns-qaw-a-neighbors-${stamp}.csv`, auditCsv(state.inv, state.neighbors), 'text/csv')
-  else download(`ns-qaw-a-neighbors-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json')
+  if (kind === 'csv') download(`nineone-gis-neighbors-${stamp}.csv`, auditCsv(state.inv, state.neighbors), 'text/csv')
+  else download(`nineone-gis-neighbors-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json')
   logMsg(`Neighbour audit saved (${payload.monitored.length} monitored).`)
 }
 
-function logMsg(text, who = 'bot', opts = {}) {
+function logMsg(text: any, who = 'bot', opts: any = {}) {
   const panel = $('copilot')
   const log = $('log')
   if (!log) return
@@ -594,27 +866,42 @@ function logMsg(text, who = 'bot', opts = {}) {
   const ts = opts.ts || Date.now()
   const meta = document.createElement('div')
   meta.className = 'msg-meta'
-  meta.textContent = `${who === 'user' ? 'You' : 'Copilot'} · ${new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+  const prov = opts.provenance ? ` · ${opts.provenance}` : ''
+  meta.textContent = `${who === 'user' ? 'You' : 'Copilot'}${prov} · ${new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
   const body = document.createElement('div')
   body.className = 'msg-body'
   body.textContent = String(text ?? '')
   div.appendChild(meta)
   div.appendChild(body)
+  if (who === 'bot' && opts.provenance) {
+    const rate = document.createElement('div')
+    rate.className = 'msg-rate'
+    const up = document.createElement('button')
+    up.type = 'button'
+    up.textContent = '+'
+    up.title = 'Helpful'
+    up.onclick = () => recordFeedback({ rating: 1, text: String(text ?? ''), route: opts.route || '', provenance: opts.provenance })
+    const down = document.createElement('button')
+    down.type = 'button'
+    down.textContent = '−'
+    down.title = 'Not helpful'
+    down.onclick = () => recordFeedback({ rating: -1, text: String(text ?? ''), route: opts.route || '', provenance: opts.provenance })
+    rate.append(up, down)
+    div.appendChild(rate)
+  }
   log.appendChild(div)
   if (opts.persist !== false) {
     persistChatEntry(text, who, ts)
   }
-  // Force layout flush so a just-submitted user prompt paints immediately.
-  // This avoids "message N shows after message N+1" on some event loops.
   void div.offsetHeight
   if (nearBottom || who === 'user') log.scrollTop = log.scrollHeight
   return div
 }
 
-async function typeBotMessage(text, speedMs = 10) {
+async function typeBotMessage(text, speedMs = 10, metaOpts = {}) {
   const full = String(text ?? '')
   const ts = Date.now()
-  const div = logMsg('', 'bot', { persist: false, ts })
+  const div = logMsg('', 'bot', { persist: false, ts, ...metaOpts })
   const body = div?.querySelector('.msg-body')
   if (!body) {
     persistChatEntry(full, 'bot', ts)
@@ -632,9 +919,9 @@ async function typeBotMessage(text, speedMs = 10) {
   persistChatEntry(full, 'bot', ts)
 }
 
-function createStreamingBotMessage() {
+function createStreamingBotMessage(metaOpts = {}) {
   const ts = Date.now()
-  const div = logMsg('', 'bot', { persist: false, ts })
+  const div = logMsg('', 'bot', { persist: false, ts, ...metaOpts })
   const body = div?.querySelector('.msg-body')
   let full = ''
   return {
@@ -671,7 +958,7 @@ function setChatBusy(busy, label = '') {
   const askInput = $('ask')
   const runBtn = $('composer')?.querySelector('button[type="submit"]')
   if (askInput) askInput.disabled = false
-  if (runBtn) runBtn.disabled = busy
+  if (runBtn) (runBtn as HTMLButtonElement).disabled = busy
 }
 
 function speak(text) {
@@ -683,13 +970,13 @@ function speak(text) {
     .replace(/TOK_/g, 'Tok ')
     .trim()
   if (!clean) return
+  stopSpeaking()
   const voices = window.speechSynthesis.getVoices?.() || []
   const preferred =
     voices.find((v) => /en/i.test(v.lang) && /(natural|neural|siri|google|microsoft|aria|jenny|guy)/i.test(v.name)) ||
     voices.find((v) => /en/i.test(v.lang)) ||
     voices[0] ||
     null
-  window.speechSynthesis.cancel()
   const u = new SpeechSynthesisUtterance(clean)
   if (preferred) u.voice = preferred
   u.lang = preferred?.lang || 'en-US'
@@ -699,30 +986,38 @@ function speak(text) {
   window.speechSynthesis.speak(u)
 }
 
-async function applyIntent(intent, opts = {}) {
+async function applyIntent(intent: any, opts: any = {}) {
   if (!intent || intent.type === 'empty') return
+  intent = ensureFly(intent, state.inv)
   setCopilotOpen(true)
   if (intent.type === 'recipe' && intent.recipe) {
     const prevView = state.recipe.view
     const view = intent.recipe.view || prevView
-    state.recipe = { ...defaultRecipe(), ...intent.recipe, view }
-    clearNeighbors()
-    state.section = intent.section ?? null
+    // A turn is a patch, not a reply: keys the turn does not mention survive.
+    // Only an explicit reset ("back to overview") starts from defaults.
+    const base = intent.reset ? defaultRecipe() : state.recipe
+    state.recipe = sanitizeRecipe({ ...base, ...intent.recipe, view }, state.inv)
+    // Toggling a layer must not destroy an in-progress tier-1 session.
+    if (intent.reset || (intent.select && intent.select !== state.selected)) clearNeighbors()
+    state.section = intent.reset ? null : (intent.section ?? state.section)
     if (intent.select) state.selected = intent.select
     paint()
-    document.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === state.recipe.view))
-    if (state.map && view !== prevView) applyView(state.map, view)
-    if (intent.fly === 'planned') flySet((s) => v(s.status) === 'planned')
-    else if (intent.fly === 'alarms') flySet((s) => s.in_alarm)
-    else if (intent.fly === 'select') flyToSite(state.selected)
-    else if (intent.fly === 'dt' || intent.fly === 'dt-focus') flyDtFocus(state.heavy?.dt?.bbox || state.inv.drive_test?.bbox)
-    else if (intent.fly === 'dt-near') flyDtNearSelection()
-    else if (intent.fly === 'gh') flyBbox(state.heavy?.gh?.bbox || state.inv.groundhog?.bbox)
-    else if (intent.fly === 'cluster') cinematic()
+    if (state.map && state.selected) setSelectedState(state.map, state.selected)
+    document.querySelectorAll('[data-view]').forEach((b) => {
+      const el = b as HTMLElement
+      el.classList.toggle('on', el.dataset.view === state.recipe.view)
+    })
+    if (state.map && view !== prevView) {
+      applyView(state.map, view)
+      if (intent.fly) runCameraAction(() => executeFly(intent))
+    } else if (intent.fly) {
+      executeFly(intent)
+    }
   } else if (intent.type === 'select') {
     select(intent.select ?? null)
   } else if (intent.type === 'neighbors' && intent.siteId) {
     startNeighbors(intent.siteId)
+    intent.narrate = formatNeighborNarrate(state.inv, intent.siteId, state.neighbors)
   } else if (intent.type === 'drop') {
     setTool('drop')
   } else if (intent.type === 'audit') {
@@ -730,61 +1025,116 @@ async function applyIntent(intent, opts = {}) {
   } else if (intent.type === 'qa') {
     if (intent.select) state.selected = intent.select
     else if (intent.site?.site_id) state.selected = intent.site.site_id
-    if (state.selected) paint()
-    if (intent.fly === 'select' && state.selected) flyToSite(state.selected)
+    if (state.selected) {
+      paint()
+      if (intent.fly === 'select') flyToSite(state.selected)
+      else renderCard()
+    }
   }
-  if (intent.narrate && !opts.skipNarrate) {
-    await typeBotMessage(intent.narrate)
-    speak(intent.narrate)
+  if (!opts.skipNarrate) {
+    const text = String(intent.narrate ?? '').trim() || 'I only handle map commands for this Tokyo RAN ingest. Try: sites in alarm, show drive test, tier-1 neighbours for TOK_001.'
+    const prov = opts.provenance === 'model' ? 'model' : (opts.provenance === 'none' ? 'degraded' : 'local rule')
+    const meta = { provenance: prov, route: opts.route || '' }
+    setCopilotOpen(true)
+    const instant = opts.route === 'local' || opts.provenance === 'inventory' || opts.provenance === 'none' || intent.type === 'neighbors' || intent.type === 'qa'
+    if (instant) {
+      logMsg(text, 'bot', meta)
+      speak(text)
+    } else {
+      await typeBotMessage(text, 10, meta)
+      speak(text)
+    }
   }
   renderStarters()
+  renderCopilotScope()
   placeCard()
 }
 
-async function ask(q) {
+async function ask(q, { voice = false } = {}) {
   const text = (q || '').trim()
   if (!text) return
+  if (!state.inv) {
+    logMsg('Map data still loading — try again in a moment.', 'bot', { provenance: 'degraded', route: 'error' })
+    return
+  }
+  stopSpeaking()
+  if (voice) state.voiceOut = true
   setCopilotOpen(true)
   logMsg(text, 'user')
-  setChatBusy(true, 'Thinking...')
-  // Yield one frame so the user prompt is visible before intent work starts.
-  await new Promise((resolve) => requestAnimationFrame(() => resolve()))
+  setChatBusy(true, 'Matching command…')
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
   try {
-    let stream = null
-    const { intent, streamed } = await interpretWithStream(
+    let stream: any = null
+    const metaOpts: any = { provenance: 'model', route: '' }
+    const deadline = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Copilot timed out — try a quick prompt like "sites in alarm".')), 25000)
+    })
+    const { intent, streamed, meta }: any = await Promise.race([
+      interpretWithStream(
       text,
       state.inv,
       state.selected,
-      (delta) => {
-        if (!stream) {
-          stream = createStreamingBotMessage()
-          setChatBusy(true, 'Responding...')
-        }
-        stream.append(delta)
+      {
+        section: state.section,
+        onStage: (label) => setChatBusy(true, label),
+        onDelta: (delta) => {
+          if (!stream) {
+            stream = createStreamingBotMessage({ provenance: 'model', route: meta?.route || 'openai-stream' })
+            setChatBusy(true, 'Streaming answer…')
+          }
+          stream.append(delta)
+        },
       },
-    )
+    ),
+      deadline,
+    ])
+    if (meta) {
+      metaOpts.provenance = meta.provenance
+      metaOpts.route = meta.route
+    }
     if (streamed && stream) {
       const finalText = stream.finish()
       if (finalText) speak(finalText)
     }
-    await applyIntent(intent, { skipNarrate: streamed })
-  } catch (err) {
-    logMsg(`Copilot error: ${err?.message || String(err)}`)
+    await applyIntent(intent, {
+      skipNarrate: streamed,
+      provenance: metaOpts.provenance,
+      route: metaOpts.route,
+    })
+  } catch (err: any) {
+    logMsg(`Copilot error: ${err?.message || String(err)}`, 'bot', { provenance: 'degraded', route: 'error' })
   } finally {
     setChatBusy(false)
   }
 }
 
+/**
+ * #rail and #copilot slide rather than display:none, so their open state is a
+ * class — [hidden] { display: none !important } cannot be transitioned. `inert`
+ * keeps a closed panel out of the tab order and off the a11y tree.
+ */
+function isPanelOpen(id) {
+  return !!$(id)?.classList.contains('open')
+}
+
+function setPanelOpen(id, open) {
+  const el = $(id)
+  if (!el) return
+  el.classList.toggle('open', open)
+  el.inert = !open
+  el.setAttribute('aria-hidden', String(!open))
+}
+
 function placeCard() {
   const card = $('card')
   if (!card || card.hidden) return
-  card.classList.toggle('beside-rail', !$('rail').hidden)
+  card.classList.toggle('beside-rail', isPanelOpen('rail'))
 }
 
 function setCopilotOpen(open) {
   const panel = $('copilot')
   if (!panel) return
-  panel.hidden = !open
+  setPanelOpen('copilot', open)
   if (open && $('log')?.children.length) panel.dataset.chat = '1'
   const fab = $('copilot-fab')
   if (fab) {
@@ -819,37 +1169,59 @@ function updateHud() {
   }
   if ($('hud-selection')) $('hud-selection').textContent = `Selection ${selectedN}`
   if ($('hud-latency')) $('hud-latency').textContent = `Frame ${state.frameMs ? state.frameMs.toFixed(1) : '—'} ms`
+  if ($('counts')) {
+    $('counts').textContent = state.hud.counts
+    $('counts').title = state.hud.countsTitle
+  }
 }
 
-function toggle(id, show) {
+function toggle(id: string, show?: boolean) {
+  const next = show === undefined ? !isPanelOpen(id) : !!show
   if (id === 'copilot') {
-    const next = show === undefined ? $('copilot')?.hidden : !!show
     setCopilotOpen(next)
-    if (window.innerWidth < 960 && next) $('rail').hidden = true
-    return
+    // Narrow viewports have room for one panel, not two.
+    if (window.innerWidth < 960 && next) setPanelOpen('rail', false)
+  } else {
+    setPanelOpen(id, next)
+    if (window.innerWidth < 960 && id === 'rail' && next) setCopilotOpen(false)
   }
-  const el = $(id)
-  if (show === undefined) el.hidden = !el.hidden
-  else el.hidden = !show
-  if (window.innerWidth < 960) {
-    if (id === 'rail' && !el.hidden) setCopilotOpen(false)
-  }
+  if (next) setFocusMode(false)
   placeCard()
+}
+
+/**
+ * Focus mode: map only. Chrome fades and both panels collapse — leaving a 456px
+ * chat over the map would defeat the point. The restore button and the basemap
+ * attribution stay; nothing else does. F / C / \ bring it all back.
+ */
+function setFocusMode(on) {
+  const next = !!on
+  document.body.classList.toggle('focus', next)
+  $('btn-focus')?.setAttribute('aria-pressed', String(next))
+  if (next) {
+    setPanelOpen('rail', false)
+    setCopilotOpen(false)
+    placeCard()
+    // setCopilotOpen parks focus on the FAB, which focus mode has just faded out.
+    setTimeout(() => $('focus-exit')?.focus(), 0)
+  }
 }
 
 function bindVoice() {
   const btn = $('btn-mic')
-  const Speech = window.SpeechRecognition || window.webkitSpeechRecognition
+  const Speech = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
   if (!Speech) {
     btn.disabled = true
     btn.title = 'Voice needs Chrome or Edge'
     return
   }
   const rec = new Speech()
+  state.voiceRec = rec
   rec.lang = 'en-US'
   rec.interimResults = false
   rec.continuous = false
   rec.onstart = () => {
+    stopSpeaking()
     if (!state.voiceGreeted) {
       logMsg('Hi, I am Copilot. Tell me what you want to check, for example: daily drive test near TOK_NEW_03.')
       state.voiceGreeted = true
@@ -862,8 +1234,7 @@ function bindVoice() {
     const text = Array.from(e.results).map((r) => r[0].transcript).join(' ').trim()
     if (!text) return
     $('ask').value = text
-    state.voiceOut = true
-    ask(text)
+    enqueueAsk(text, { voice: true })
   }
   rec.onerror = (e) => {
     btn.classList.remove('on')
@@ -873,7 +1244,8 @@ function bindVoice() {
   btn.onclick = () => {
     setCopilotOpen(true)
     if (btn.classList.contains('on')) {
-      rec.stop()
+      stopVoiceCapture()
+      stopSpeaking()
       return
     }
     state.voiceOut = true
@@ -904,6 +1276,23 @@ function bindSearch() {
   })
 }
 
+function hideMeasureBar() {
+  const el = $('measure')
+  if (!el) return
+  el.hidden = true
+  el.classList.remove('armed')
+  el.textContent = ''
+  if (state.map) setMeasureData(state.map, null)
+}
+
+function showPinMeasureBar(lat, lng) {
+  const el = $('measure')
+  if (!el) return
+  el.hidden = false
+  el.classList.remove('armed')
+  el.textContent = `Candidate ${lat.toFixed(5)} N ${lng.toFixed(5)} E — click sectors to add or remove`
+}
+
 function setTool(name) {
   state.tool = name
   state.measurePts = []
@@ -919,8 +1308,7 @@ function setTool(name) {
     $('measure').classList.add('armed')
     $('measure').textContent = 'Click the map to place a candidate rooftop'
   } else {
-    $('measure').hidden = true
-    $('measure').classList.remove('armed')
+    hideMeasureBar()
   }
 }
 
@@ -929,12 +1317,16 @@ function bindTools() {
     btn.addEventListener('click', () => setTool(btn.dataset.tool))
   })
   $('basemap').addEventListener('change', () => {
+    document.body.classList.toggle('map-dark', onDarkBasemap())
     setBasemap(state.map, $('basemap').value, () => paint())
   })
   document.querySelectorAll('[data-view]').forEach((btn) => {
     btn.addEventListener('click', () => {
       state.recipe.view = btn.dataset.view
-      document.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === state.recipe.view))
+      document.querySelectorAll('[data-view]').forEach((b) => {
+        const el = b as HTMLElement
+        el.classList.toggle('on', el.dataset.view === state.recipe.view)
+      })
       applyView(state.map, state.recipe.view)
       paint()
       recipeHash()
@@ -942,14 +1334,14 @@ function bindTools() {
   })
   $('btn-import').onclick = () => $('file-import').click()
   $('file-import').addEventListener('change', async (e) => {
-    const file = e.target.files?.[0]
+    const file = (e.target as HTMLInputElement).files?.[0]
     if (!file) return
     try {
       state.userFc = parseImport(await file.text(), file.name)
       setUserData(state.map, state.userFc)
       logMsg(`Imported ${state.userFc.features.length} features.`)
-    } catch (err) {
-      logMsg(`Import failed: ${err.message}`)
+    } catch (err: any) {
+      logMsg(`Import failed: ${err?.message || err}`)
     }
   })
   const exportExtras = () => ({
@@ -961,22 +1353,22 @@ function bindTools() {
   })
   $('btn-geojson').onclick = () => {
     const extras = exportExtras()
-    download('ns-qaw-a.geojson', JSON.stringify(layersToGeoJSON(visibleLayers(state.geo, state.recipe, state.userFc, extras)), null, 2), 'application/geo+json')
+    download('nineone-gis.geojson', JSON.stringify(layersToGeoJSON(visibleLayers(state.geo, state.recipe, state.userFc, extras)), null, 2), 'application/geo+json')
     logMsg('GeoJSON exports vector layers. Groundhog and DT sample points remain GPU-only; DT routes are included when enabled.')
   }
   $('btn-kml').onclick = () => {
     const extras = exportExtras()
-    download('ns-qaw-a.kml', layersToKml(visibleLayers(state.geo, state.recipe, state.userFc, extras)), 'application/vnd.google-earth.kml+xml')
+    download('nineone-gis.kml', layersToKml(visibleLayers(state.geo, state.recipe, state.userFc, extras)), 'application/vnd.google-earth.kml+xml')
     logMsg('KML exports vector layers. Groundhog and DT sample points remain GPU-only; DT routes are included when enabled.')
   }
   $('btn-shot').onclick = async () => {
     try {
       recipeHash()
       const png = await snapshotCanvas(state.map)
-      downloadPng(png, 'ns-qaw-a.png')
+      downloadPng(png, 'nineone-gis.png')
       navigator.clipboard?.writeText(location.href)
       logMsg('Snapshot saved. Recipe URL copied.')
-    } catch (err) {
+    } catch (err: any) {
       logMsg(`Snapshot failed: ${err?.message || String(err)}`)
     }
   }
@@ -1003,9 +1395,7 @@ function onMapClick(e) {
   if (state.tool === 'drop') {
     startNeighborsPin(e.lngLat.lng, e.lngLat.lat)
     setTool('pan')
-    $('measure').hidden = false
-    $('measure').classList.remove('armed')
-    $('measure').textContent = `Candidate ${e.lngLat.lat.toFixed(5)} N ${e.lngLat.lng.toFixed(5)} E — click sectors to add or remove`
+    showPinMeasureBar(e.lngLat.lat, e.lngLat.lng)
     return
   }
   const hit = queryHit(state.map, e)
@@ -1028,36 +1418,35 @@ function onMapClick(e) {
   }
   if (hit?.siteId) {
     setProbeData(state.map, null)
+    setPicker(null)
     select(hit.siteId)
     return
   }
   const desc = describePick(pickPoint(state.map, e.point), state.heavy)
   if (desc) {
     setProbeData(state.map, { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [desc.lng, desc.lat] } }] })
-    $('measure').hidden = false
-    $('measure').textContent = `${desc.kind} · ${desc.rsrp.toFixed(1)} dBm · ${desc.lat.toFixed(5)} N ${desc.lng.toFixed(5)} E ← ${desc.source}`
+    setPicker({ lng: desc.lng, lat: desc.lat })
     return
   }
-  setProbeData(state.map, null)
+  // Empty ground: pin the picker there rather than only clearing selection.
+  setProbeData(state.map, { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [e.lngLat.lng, e.lngLat.lat] } }] })
+  setPicker(e.lngLat)
   select(null)
 }
 
 async function boot() {
-  const inv = await fetch('./inventory.json').then((r) => r.json())
+  const inv = await loadInventory()
   state.inv = inv
-  const [gh, dt, dtPaths] = await Promise.all([
-    loadPacked(inv.groundhog?.file ? `./${inv.groundhog.file}` : './gh.bin'),
-    loadPacked(inv.drive_test?.file ? `./${inv.drive_test.file}` : './dt.bin'),
-    inv.drive_test_paths?.file
-      ? fetch(`./${inv.drive_test_paths.file}`).then((r) => (r.ok ? r.json() : { type: 'FeatureCollection', features: [] }))
-      : Promise.resolve({ type: 'FeatureCollection', features: [] }),
-  ])
+  const [{ gh, dt }, dtPaths] = await Promise.all([loadHeavy(inv), loadDtPaths(inv)])
   state.heavy = { gh, dt }
   state.dtPaths = dtPaths
   state.dtPreview = buildDtPreview(dt)
   state.holesFc = buildHoles(gh)
   const cam = loadHash()
-  document.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === state.recipe.view))
+    document.querySelectorAll('[data-view]').forEach((b) => {
+      const el = b as HTMLElement
+      el.classList.toggle('on', el.dataset.view === state.recipe.view)
+    })
   let booted = false
   const finish = () => {
     if (booted) { paint(); return }
@@ -1078,6 +1467,9 @@ async function boot() {
   }
   state.map = createMap($('map'), { view: state.recipe.view, onLoad: finish })
   window.__map = state.map
+  // Debug handle, alongside __map / __paintErr — lets a console or a smoke test
+  // read the live recipe without scraping the DOM.
+  window.__state = state
   setTimeout(() => { if (!booted) finish() }, 1200)
   let lastRender = performance.now()
   state.map.on('render', () => {
@@ -1091,28 +1483,37 @@ async function boot() {
     updateHud()
   })
   state.map.on('click', onMapClick)
+  // The picker is pinned to the ground, so it has to be re-projected on every
+  // camera frame — that is what makes it read as stuck to the map.
+  state.map.on('move', () => { if (state.picker) renderPicker() })
   state.map.on('moveend', () => recipeHash())
+  // Lobes hold a constant on-screen size, so their geometry follows the zoom.
+  state.map.on('zoom', queueSectorRepaint)
   state.map.on('zoomend', () => {
     const z = state.map.getZoom()
     const crossed = (state.__z < 10) !== (z < 10)
     state.__z = z
+    // buildGeo emits no sectors below z10, so crossing that line needs a full repaint.
     if (crossed) paint()
+    else queueSectorRepaint()
   })
   new ResizeObserver(() => state.map?.resize()).observe($('stage'))
 
+  document.body.classList.toggle('map-dark', onDarkBasemap())
   bindSearch()
   bindTools()
   bindVoice()
   hydrateChatLog()
-  let askQueue = Promise.resolve()
-  const submitAsk = () => {
+  setChatBusy(false)
+  setAskQueue(Promise.resolve())
+  window.addEventListener('unhandledrejection', () => setChatBusy(false))
+  const submitAsk = (fromVoice = false) => {
     const input = $('ask')
     if (!input) return
     const q = input.value.trim()
+    if (!q) return
     input.value = ''
-    askQueue = askQueue.then(() => ask(q)).catch((err) => {
-      logMsg(`Copilot error: ${err?.message || String(err)}`)
-    })
+    enqueueAsk(q, { voice: fromVoice })
   }
   $('composer').addEventListener('submit', (e) => {
     e.preventDefault()
@@ -1121,6 +1522,15 @@ async function boot() {
   const runBtn = $('composer')?.querySelector('button[type="submit"]')
   if (runBtn) runBtn.addEventListener('click', (e) => { e.preventDefault(); submitAsk() })
   $('ask').addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+      if (state.chatBusy && !window.getSelection()?.toString()) {
+        stopSpeaking()
+        stopVoiceCapture()
+        setChatBusy(false)
+        setAskQueue(Promise.resolve())
+      }
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       submitAsk()
@@ -1132,11 +1542,16 @@ async function boot() {
     }
   })
   $('btn-rail').onclick = () => toggle('rail')
-  if ($('btn-copilot')) $('btn-copilot').onclick = () => toggle('copilot')
   if ($('copilot-fab')) $('copilot-fab').onclick = () => toggle('copilot')
-  $('rail-x').onclick = () => { $('rail').hidden = true; placeCard() }
+  $('rail-x').onclick = () => { setPanelOpen('rail', false); placeCard() }
+  if ($('btn-focus')) $('btn-focus').onclick = () => setFocusMode(!document.body.classList.contains('focus'))
+  if ($('focus-exit')) $('focus-exit').onclick = () => setFocusMode(false)
+  bindLayerRail()
   $('copilot-x').onclick = () => setCopilotOpen(false)
   if ($('copilot-clear')) $('copilot-clear').onclick = () => {
+    stopSpeaking()
+    stopVoiceCapture()
+    state.voiceOut = false
     const log = $('log')
     if (log) log.innerHTML = ''
     clearChatLog()
@@ -1146,25 +1561,32 @@ async function boot() {
     renderStarters()
   }
   if ($('copilot-reset-memory')) $('copilot-reset-memory').onclick = () => {
-    askQueue = askQueue.then(() => ask('reset memory')).catch((err) => {
-      logMsg(`Copilot error: ${err?.message || String(err)}`)
-      setChatBusy(false)
-    })
+    enqueueAsk('reset memory')
   }
   setCopilotOpen(false)
 
   window.addEventListener('keydown', (e) => {
-    if (e.target.matches('input, textarea, select')) {
-      if (e.key === 'Escape') e.target.blur()
+    const target = e.target as HTMLElement | null
+    if (target?.matches('input, textarea, select')) {
+      if (e.key === 'Escape') target.blur()
       return
     }
+    if (e.ctrlKey || e.metaKey || e.altKey) return
     if (e.key === '/') { e.preventDefault(); $('search').focus() }
     if (e.key === 'f' || e.key === 'F') toggle('rail')
     if (e.key === 'c' || e.key === 'C') toggle('copilot')
-    if (e.key === 'Escape') { clearNeighbors(); state.selected = null; state.section = null; $('rail').hidden = true; setCopilotOpen(false); $('measure').hidden = true; setProbeData(state.map, null); paint(); renderStarters() }
+    if (e.key === '\\') { e.preventDefault(); setFocusMode(!document.body.classList.contains('focus')) }
+    if (e.key === 'Escape') { setFocusMode(false); clearNeighbors(); state.selected = null; state.section = null; setPanelOpen('rail', false); setCopilotOpen(false); hideMeasureBar(); setPicker(null); setProbeData(state.map, null); paint(); renderStarters() }
   })
 }
 
-boot().catch((err) => {
-  document.body.innerHTML = `<p style="padding:24px;color:#eee">Failed to load inventory.json. Run ingest.py. ${err}</p>`
-})
+let bootPromise = null
+
+export function bootLegacyApp() {
+  if (bootPromise) return bootPromise
+  bootPromise = boot().catch((err) => {
+    document.body.innerHTML = `<p style="padding:24px;color:#eee">Failed to load inventory.json. Run product/db/ingest.py. ${err}</p>`
+    throw err
+  })
+  return bootPromise
+}

@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import csv
+import os
+import sys
 import json
 import struct
 from collections import Counter, defaultdict
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-GIS = HERE.parent
-ROOT = GIS.parent
+HERE = Path(__file__).resolve().parent      # product/db
+APP = HERE.parent                           # product
+GIS = APP.parent                            # GIS
+ROOT = GIS.parent                          # platform repo root
+PUBLISHED = HERE / "published"
+PUBLISHED.mkdir(parents=True, exist_ok=True)
 DATA = GIS / "data"
 
 MCC_MNC = "440-11"
@@ -515,7 +520,7 @@ def main() -> None:
         dt += ingest_points_from_csv(p, "lat(Layer3)", "lng(Layer3)", "RSRP(Layer3)")
     dt = dt[:MAX_HEAVY]
     dt_paths_fc = build_dt_paths(dt_files)
-    dt_paths_file = HERE / "dt_paths.geojson"
+    dt_paths_file = PUBLISHED / "dt_paths.geojson"
     dt_paths_file.write_text(json.dumps({"type": "FeatureCollection", "features": dt_paths_fc["features"]}), encoding="utf-8")
 
     voc_file = first_existing([p for p in all_csv if p.name.lower().startswith("voc_") and p.name.lower().endswith(".csv")])
@@ -536,8 +541,8 @@ def main() -> None:
     sukayat_file = first_existing([p for p in all_csv if p.name.lower() == "alarm-monitoring.csv"])
     sukayat = ingest_sukayat(sukayat_file) if sukayat_file else ingest_sukayat(Path("__missing__.csv"))
 
-    gh_meta = write_packed(HERE / "gh.bin", gh)
-    dt_meta = write_packed(HERE / "dt.bin", dt)
+    gh_meta = write_packed(PUBLISHED / "gh.bin", gh)
+    dt_meta = write_packed(PUBLISHED / "dt.bin", dt)
 
     inventory = {
         "generated_from": {
@@ -619,9 +624,75 @@ def main() -> None:
         "alarm_rows": alarm_index.get("rows_scanned", 0),
         "sukayat": {k: sukayat[k] for k in ("read", "rows_scanned", "open_kanto", "note")},
     }
-    (HERE / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
-    (HERE / "ingest-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    (PUBLISHED / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+
+    # --postgis loads the same model into ran.* as well. Off by default: the
+    # prototype must keep running with no database present.
+    if "--postgis" in sys.argv:
+        org = os.environ.get("GEO_ORG_ID", "demo")
+        ws = os.environ.get("GEO_WORKSPACE_ID", "tokyo")
+        try:
+            report["postgis"] = publish_to_postgis(inventory, gh, dt, dt_paths_fc, org_id=org, workspace_id=ws)
+            report["postgis"]["tenant"] = f"{org}/{ws}"
+        except Exception as exc:
+            report["postgis"] = {"error": str(exc)}
+
+    (PUBLISHED / "ingest-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Publish to PostGIS (optional second sink)
+# ---------------------------------------------------------------------------
+
+def publish_to_postgis(inventory: dict, gh: list, dt: list, dt_paths_fc: dict,
+                       *, org_id: str, workspace_id: str) -> dict:
+    """Load the same published model into ran.* via the context-layer repository.
+
+    Goes through repositories/geo/loader.py rather than opening its own connection:
+    PLATFORM.md's rule is that only the Context Layer touches a store. The file
+    artifacts stay the default so this prototype still runs with no database.
+    """
+    import sys
+    root = ROOT  # platform repo root, one level above GIS
+    for extra in (str(root), str(root / "context-layer")):
+        if extra not in sys.path:
+            sys.path.insert(0, extra)
+    from repositories.geo.loader import load_cells, load_routes, load_samples
+
+    cells = [{
+        "site_id": c.get("site_id"),
+        "cell_id": c.get("cell_id"),
+        "tech": _unwrap(c.get("tech")),
+        "lat": _unwrap(c.get("lat")),
+        "lng": _unwrap(c.get("lng")),
+        "azimuth": _unwrap(c.get("azimuth")),
+        "hpbw": _unwrap(c.get("hpbw")),
+        "mech_tilt": _unwrap(c.get("mech_tilt")),
+        "elec_tilt": _unwrap(c.get("elec_tilt")),
+        "height_m": _unwrap(c.get("height_m")),
+        "pci": _unwrap(c.get("pci")),
+        "band": _unwrap(c.get("band")),
+        "area": _unwrap(c.get("site_type")),
+    } for c in inventory.get("cells", [])]
+
+    n_cells = load_cells(cells, org_id=org_id, workspace_id=workspace_id, geo_source="ns-qaw-ingest")
+    n_gh = load_samples(
+        ({"sample_id": i, "lng": r[0], "lat": r[1], "rsrp": r[2]} for i, r in enumerate(gh)),
+        kind="gh", org_id=org_id, workspace_id=workspace_id, geo_source="gh.bin")
+    n_dt = load_samples(
+        ({"sample_id": i, "lng": r[0], "lat": r[1], "rsrp": r[2]} for i, r in enumerate(dt)),
+        kind="dt", org_id=org_id, workspace_id=workspace_id, geo_source="dt.bin")
+    n_routes = load_routes(dt_paths_fc.get("features") or [],
+                           org_id=org_id, workspace_id=workspace_id, geo_source="dt_paths")
+    return {"cells": n_cells, "gh": n_gh, "dt": n_dt, "routes": n_routes}
+
+
+def _unwrap(field):
+    """inventory.json wraps every field as {value, source, measuredAt}."""
+    if isinstance(field, dict) and "value" in field:
+        return field["value"]
+    return field
 
 
 if __name__ == "__main__":

@@ -1,0 +1,23 @@
+[project]
+name = "nineone-gis-backend"
+version = "1.0.0"
+description = "NineOne GIS backend host/proxy for frontend, Copilot, and geo-api"
+requires-python = ">=3.11"
+# serve.py is otherwise stdlib-only: the HTTP server, the geo-api proxy and the
+# SSE relay all use http.server + urllib on purpose.
+dependencies = [
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+# Only db/ needs these — ingest and the PostGIS loader. The web backend does not
+# import them, so a file-only deployment stays a one-dependency install.
+db = [
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+    "h3>=4.1,<5",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

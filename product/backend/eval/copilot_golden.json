@@ -1,0 +1,12 @@
+[
+  { "prompt": "sites in alarm", "expectRoute": "local", "expectType": "recipe" },
+  { "prompt": "show drive test", "expectRoute": "local", "expectType": "recipe" },
+  { "prompt": "show groundhog", "expectRoute": "local", "expectType": "recipe" },
+  { "prompt": "tier-1 neighbours for TOK_001", "expectRoute": "local", "expectType": "neighbors" },
+  { "prompt": "what alarms on TOK_001", "expectRoute": "local", "expectType": "qa" },
+  { "prompt": "drop a new site", "expectRoute": "local", "expectType": "drop" },
+  { "prompt": "back to overview", "expectRoute": "local", "expectType": "recipe" },
+  { "prompt": "why is coverage bad in ginza vs shibuya", "expectRoute": "openai-stream", "expectType": "qa", "needsModel": true },
+  { "prompt": "reset memory", "expectRoute": "local", "expectType": "qa" },
+  { "prompt": "TOK_NEW_02", "expectRoute": "local", "expectType": "select" }
+]

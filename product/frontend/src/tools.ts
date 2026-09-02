@@ -1,4 +1,6 @@
-import { v } from './lobes.js'
+import { bearing, circle, distance, lineString, point } from '@turf/turf'
+
+import { v } from './lobes'
 
 export function searchHits(inv, q, limit = 12) {
   const s = (q || '').trim().toLowerCase()
@@ -25,27 +27,27 @@ export function searchHits(inv, q, limit = 12) {
 }
 
 export function measureDistance(a, b) {
-  const from = turf.point(a)
-  const to = turf.point(b)
-  const m = turf.distance(from, to, { units: 'meters' })
-  const brg = turf.bearing(from, to)
+  const from = point(a)
+  const to = point(b)
+  const m = distance(from, to, { units: 'meters' })
+  const brg = bearing(from, to)
   return {
     kind: 'distance',
     meters: m,
     bearing: brg,
     label: `${m.toFixed(0)} m · bearing ${brg.toFixed(0)}°`,
-    fc: { type: 'FeatureCollection', features: [turf.lineString([a, b])] },
+    fc: { type: 'FeatureCollection', features: [lineString([a, b])] },
   }
 }
 
 export function measureRadius(center, edge) {
-  const m = turf.distance(turf.point(center), turf.point(edge), { units: 'meters' })
-  const circle = turf.circle(center, m / 1000, { steps: 64, units: 'kilometers' })
+  const m = distance(point(center), point(edge), { units: 'meters' })
+  const ring = circle(center, m / 1000, { steps: 64, units: 'kilometers' })
   return {
     kind: 'radius',
     meters: m,
     label: `Radius ${m.toFixed(0)} m`,
-    fc: { type: 'FeatureCollection', features: [circle] },
+    fc: { type: 'FeatureCollection', features: [ring] },
   }
 }
 
@@ -121,14 +123,14 @@ function kmlToFc(xml) {
   return { type: 'FeatureCollection', features }
 }
 
-async function waitForFrame(map) {
+async function waitForFrame(map: any) {
   if (!map) return
   try { map.triggerRepaint?.() } catch { /* */ }
-  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 }
 
-function waitMapIdle(map, ms = 1200) {
-  return new Promise((resolve) => {
+function waitMapIdle(map: any, ms = 1200) {
+  return new Promise<void>((resolve) => {
     if (!map) return resolve()
     const settledNow = map.loaded?.() && map.isStyleLoaded?.() && (typeof map.areTilesLoaded !== 'function' || map.areTilesLoaded())
     if (settledNow) return resolve()
@@ -176,7 +178,7 @@ function composeMapCanvases(map) {
   ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, w, h)
 
-  const canvases = Array.from(map.getContainer().querySelectorAll('canvas'))
+  const canvases = Array.from(map.getContainer().querySelectorAll('canvas')) as HTMLCanvasElement[]
   let drawn = 0
   for (const c of canvases) {
     const style = getComputedStyle(c)

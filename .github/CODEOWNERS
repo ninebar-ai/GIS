@@ -1,0 +1,9 @@
+# Replace placeholders with real GitHub usernames or teams.
+
+* @replace-with-team-or-owner
+
+# Suggested fine-grained ownership
+/product/ @replace-with-gis-owner
+/docs/ @replace-with-architecture-owner
+/process/ @replace-with-process-owner
+/.planning/ @replace-with-tech-lead

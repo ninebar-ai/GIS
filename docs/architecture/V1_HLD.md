@@ -1,7 +1,7 @@
 # NS-QAW V1 High-Level Design (HLD)
 
 ## 1) Purpose
-This document defines the V1 architecture for the Tokyo RF GIS workbench in `ns-qaw-a`.
+This document defines the V1 architecture for the Tokyo RF GIS workbench in `product/`.
 
 V1 delivery scope:
 - A1: Site and layer visualization
@@ -33,7 +33,7 @@ V1 delivery scope:
 ## 4) Deployment Context
 ```mermaid
 flowchart TB
-  ENG["RF Engineer Browser"] --> APP["ns-qaw-a web app"]
+  ENG["RF Engineer Browser"] --> APP["product/frontend web app"]
   APP --> STATIC["Static assets (index/app/map/etc.)"]
   APP --> INV["inventory.json"]
   APP --> HEAVY["gh.bin + dt.bin + dt_paths.geojson"]

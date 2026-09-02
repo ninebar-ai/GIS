@@ -1,4 +1,4 @@
-# Serve ns-qaw-a and proxy LLM calls so the browser never holds a CORS fight.
+# Serve the GIS product and proxy LLM calls so the browser never holds a CORS fight.
 #   python serve.py
 # Keys: set OPENAI_API_KEY and/or ANTHROPIC_API_KEY, or pass headers from client.
 from __future__ import annotations
@@ -15,6 +15,16 @@ from pathlib import Path
 from openai import OpenAI, OpenAIError
 
 HERE = Path(__file__).resolve().parent
+APP = HERE.parent                       # product/
+DIST = APP / "frontend" / "dist"        # vite build output
+PUBLISHED = APP / "db" / "published"    # ingest artifacts
+
+# geo-api (PostGIS) lives behind this proxy so the browser talks to one origin and
+# never holds the tenant identity itself. Unset GEO_API_URL to run file-only.
+GEO_API_URL = os.environ.get("GEO_API_URL", "http://127.0.0.1:8013").rstrip("/")
+GEO_ORG_ID = os.environ.get("GEO_ORG_ID", "demo")
+GEO_WORKSPACE_ID = os.environ.get("GEO_WORKSPACE_ID", "tokyo")
+GEO_TIMEOUT_S = float(os.environ.get("GEO_TIMEOUT_S", "20"))
 
 
 def _load_dotenv(path: Path) -> None:
@@ -37,11 +47,34 @@ ANTHROPIC = "https://api.anthropic.com/v1/messages"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-latest")
 CLAUDE_MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "700"))
 CHAT_MEMORY_MAX_MESSAGES = int(os.environ.get("CHAT_MEMORY_MAX_MESSAGES", "12"))
+OPENAI_TIMEOUT_S = int(os.environ.get("OPENAI_TIMEOUT_S", "60"))
+OPENAI_STREAM_TIMEOUT_S = int(os.environ.get("OPENAI_STREAM_TIMEOUT_S", "90"))
+ANTHROPIC_TIMEOUT_S = int(os.environ.get("ANTHROPIC_TIMEOUT_S", "60"))
 CHAT_MEMORY: dict[str, list[dict]] = {}
 
 
 def _json_bytes(obj) -> bytes:
     return json.dumps(obj).encode("utf-8")
+
+
+def _estimate_tokens(payload: dict) -> int:
+    """Rough token budget visibility — chars/4 heuristic."""
+    total = 0
+    for m in (payload or {}).get("messages") or []:
+        if isinstance(m, dict):
+            total += len(str(m.get("content") or ""))
+    return max(1, total // 4)
+
+
+def _log_turn(user_id: str, route: str, *, model: str | None = None, est_tokens: int = 0, ok: bool = True) -> None:
+    print(json.dumps({
+        "event": "copilot_turn",
+        "user_id": user_id,
+        "route": route,
+        "model": model,
+        "est_tokens": est_tokens,
+        "ok": ok,
+    }, ensure_ascii=True))
 
 
 def _http_json_post(url: str, payload: dict, headers: dict, timeout: int = 60) -> tuple[int, dict]:
@@ -165,8 +198,10 @@ def _remember_turn(user_id: str, req_payload: dict, res_payload: dict) -> None:
             user_msg = str(m.get("content") or "").strip()
             if user_msg:
                 break
-    # Requests may send structured JSON in the user content; keep only the
-    # human question in memory so follow-up context stays natural.
+    # A body with no role:"user" message leaves user_msg None. Without this guard
+    # the AttributeError lands after the model call has already been billed.
+    if not user_msg:
+        return
     if user_msg.startswith("{") and user_msg.endswith("}"):
         try:
             parsed = json.loads(user_msg)
@@ -186,9 +221,6 @@ def _remember_turn(user_id: str, req_payload: dict, res_payload: dict) -> None:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(HERE), **kwargs)
-
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} {fmt % args}")
 
@@ -220,10 +252,114 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
+
+    # ---- static: the built frontend and the published artifacts -----------
+
+    _TYPES = {
+        ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8", ".json": "application/json",
+        ".geojson": "application/json", ".bin": "application/octet-stream",
+        ".svg": "image/svg+xml", ".png": "image/png", ".map": "application/json",
+        ".woff2": "font/woff2", ".ico": "image/x-icon",
+    }
+
+    def _send_file(self, root: Path, rel: str) -> None:
+        """Serve one file from `root`, refusing anything that escapes it."""
+        rel = urllib.parse.unquote(rel).lstrip("/")
+        try:
+            target = (root / rel).resolve()
+            target.relative_to(root.resolve())
+        except (ValueError, OSError):
+            self.send_error(403, "outside document root")
+            return
+        if not target.is_file():
+            self.send_error(404, "not found")
+            return
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", self._TYPES.get(target.suffix.lower(), "application/octet-stream"))
+        self.send_header("Content-Length", str(len(body)))
+        # Vite content-hashes asset filenames, so they are safe to cache hard.
+        # index.html must not be, or a deploy never reaches the browser.
+        if "/assets/" in self.path:
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
+        self.end_headers()
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(body)
+
+    def _serve_frontend(self, parsed) -> None:
+        if not DIST.is_dir():
+            self.send_error(
+                503,
+                "frontend not built - run: cd product/frontend && npm install && npm run build",
+            )
+            return
+        rel = parsed.path.lstrip("/") or "index.html"
+        if not (DIST / rel).is_file():
+            if "." in rel.rsplit("/", 1)[-1]:
+                self.send_error(404, "not found")
+                return
+            rel = "index.html"
+        self._send_file(DIST, rel)
+
+    def _proxy_geo(self, parsed) -> None:
+        """Forward /geo/* to geo-api, attaching the tenant server-side.
+
+        Binary-safe: MVT tiles come back as bytes, so the body is relayed
+        unmodified and only the content type is carried over.
+        """
+        url = f"{GEO_API_URL}{parsed.path}"
+        if parsed.query:
+            url = f"{url}?{parsed.query}"
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("X-Org-Id", GEO_ORG_ID)
+        req.add_header("X-Workspace-Id", GEO_WORKSPACE_ID)
+        try:
+            with urllib.request.urlopen(req, timeout=GEO_TIMEOUT_S) as res:
+                body = res.read()
+                ctype = res.headers.get("Content-Type", "application/octet-stream")
+                status = res.status
+        except urllib.error.HTTPError as exc:
+            body = exc.read() or json.dumps({"error": f"geo-api {exc.code}"}).encode()
+            ctype = exc.headers.get("Content-Type", "application/json")
+            status = exc.code
+        except Exception as exc:
+            # The client falls back to the published files when geo-api is absent,
+            # so this must be a clean status rather than a dropped connection.
+            body = json.dumps({"error": f"geo-api unreachable: {exc}"}).encode()
+            ctype = "application/json"
+            status = 503
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if ctype.startswith("application/vnd.mapbox-vector-tile"):
+            self.send_header("Cache-Control", "public, max-age=300")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_HEAD(self):
+        self._head_only = True
+        try:
+            self.do_GET()
+        finally:
+            self._head_only = False
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+        if parsed.path.startswith("/geo/"):
+            self._proxy_geo(parsed)
+            return
+        if parsed.path.startswith("/published/"):
+            self._send_file(PUBLISHED, parsed.path[len("/published/"):])
+            return
         if parsed.path.rstrip("/") != "/api/chat/memory":
-            super().do_GET()
+            self._serve_frontend(parsed)
             return
         q = urllib.parse.parse_qs(parsed.query or "")
         user_id = str(
@@ -261,6 +397,7 @@ class Handler(SimpleHTTPRequestHandler):
             ).strip()[:128]
             removed = len(CHAT_MEMORY.get(user_id) or [])
             CHAT_MEMORY.pop(user_id, None)
+            _log_turn(user_id, "memory-reset", ok=True)
             self._send_json(200, {"ok": True, "user_id": user_id, "cleared": removed})
             return
 
@@ -281,9 +418,11 @@ class Handler(SimpleHTTPRequestHandler):
                 or "anon"
             ).strip()[:128]
             req_with_memory = _merge_with_memory(req_payload, user_id)
+            est = _estimate_tokens(req_with_memory)
             oai_key = (self.headers.get("X-OpenAI-Key") or os.environ.get("OPENAI_API_KEY") or "").strip()
             claude_key = (self.headers.get("X-Anthropic-Key") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
             if not oai_key and not claude_key:
+                _log_turn(user_id, "degraded-no-key", est_tokens=est, ok=False)
                 self._send_json(
                     401,
                     {"error": "No API key configured. Set OPENAI_API_KEY and/or ANTHROPIC_API_KEY, or pass X-OpenAI-Key / X-Anthropic-Key."},
@@ -291,6 +430,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self._send_sse_headers()
             full = ""
+            route = "degraded"
+            model = req_payload.get("model") or "gpt-4o-mini"
             if oai_key:
                 try:
                     client = OpenAI(api_key=oai_key)
@@ -303,6 +444,8 @@ class Handler(SimpleHTTPRequestHandler):
                             continue
                         full += delta
                         self._sse_send({"delta": delta})
+                    if full:
+                        route = "openai-stream"
                 except OpenAIError as exc:
                     print(f"OpenAI streaming failed: {type(exc).__name__}: {exc}")
                     full = ""
@@ -316,13 +459,17 @@ class Handler(SimpleHTTPRequestHandler):
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
+                    timeout=ANTHROPIC_TIMEOUT_S,
                 )
                 if code == 200:
                     shaped = _claude_to_openai_shape(payload)
                     full = str(((shaped.get("choices") or [{}])[0].get("message", {}).get("content")) or "").strip()
                     if full:
+                        route = "anthropic"
+                        model = CLAUDE_MODEL
                         self._sse_send({"delta": full})
             self._sse_send({"done": True})
+            _log_turn(user_id, route, model=model, est_tokens=est, ok=bool(full))
             if full:
                 _remember_turn(
                     user_id,
@@ -343,10 +490,12 @@ class Handler(SimpleHTTPRequestHandler):
             or "anon"
         ).strip()[:128]
         req_with_memory = _merge_with_memory(req_payload, user_id)
+        est = _estimate_tokens(req_with_memory)
 
         oai_key = (self.headers.get("X-OpenAI-Key") or os.environ.get("OPENAI_API_KEY") or "").strip()
         claude_key = (self.headers.get("X-Anthropic-Key") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         if not oai_key and not claude_key:
+            _log_turn(user_id, "degraded-no-key", est_tokens=est, ok=False)
             self._send_json(
                 401,
                 {"error": "No API key configured. Set OPENAI_API_KEY and/or ANTHROPIC_API_KEY, or pass X-OpenAI-Key / X-Anthropic-Key."},
@@ -354,12 +503,14 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         oai_err = None
+        model = req_payload.get("model") or "gpt-4o-mini"
         if oai_key:
             try:
                 client = OpenAI(api_key=oai_key)
                 completion = client.chat.completions.create(**_openai_kwargs(req_with_memory))
                 payload = completion.model_dump(mode="json")
                 _remember_turn(user_id, req_payload, payload)
+                _log_turn(user_id, "openai", model=model, est_tokens=est, ok=True)
                 self._send_json(200, payload)
                 return
             except OpenAIError as exc:
@@ -377,20 +528,26 @@ class Handler(SimpleHTTPRequestHandler):
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
                 },
+                timeout=ANTHROPIC_TIMEOUT_S,
             )
             if code == 200:
                 shaped = _claude_to_openai_shape(payload)
                 _remember_turn(user_id, req_payload, shaped)
+                _log_turn(user_id, "anthropic", model=CLAUDE_MODEL, est_tokens=est, ok=True)
                 self._send_json(200, shaped)
                 return
             claude_err = {"code": code, "payload": payload}
+            _log_turn(user_id, "degraded-both-failed", model=model, est_tokens=est, ok=False)
             self._send_json(502, {"error": "OpenAI and Claude both failed.", "openai": oai_err, "claude": claude_err})
             return
 
+        _log_turn(user_id, "degraded-openai-failed", model=model, est_tokens=est, ok=False)
         self._send_json(502, {"error": "OpenAI failed and Claude fallback is unavailable.", "openai": oai_err})
 
 
 if __name__ == "__main__":
-    httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"NineOne Geo  http://127.0.0.1:{PORT}/")
+    # 127.0.0.1 for local dev; 0.0.0.0 in a container, via HOST.
+    host = os.environ.get("HOST", "127.0.0.1")
+    httpd = ThreadingHTTPServer((host, PORT), Handler)
+    print(f"NineOne Geo  http://{host}:{PORT}/   dist={DIST.is_dir()}  published={PUBLISHED.is_dir()}")
     httpd.serve_forever()

@@ -1,6 +1,12 @@
+import { MapboxOverlay } from '@deck.gl/mapbox'
+import { ScatterplotLayer } from '@deck.gl/layers'
+import { ContourLayer, HeatmapLayer, HexagonLayer } from '@deck.gl/aggregation-layers'
+
 /** GPU measurement layers — deck.gl typed arrays. Mapsheet Zero: hex / heatmap / instant hover. */
 
-const COLOR_STOPS = [
+// Exported so the legend paints the same ramp the GPU does — one definition,
+// not a hand-matched copy in CSS.
+export const COLOR_STOPS: Array<[number, [number, number, number]]> = [
   [-120, [169, 67, 58]],
   [-105, [210, 118, 29]],
   [-95, [238, 154, 59]],
@@ -68,16 +74,14 @@ export async function loadPacked(url) {
   return { n, positions, colors, weights, rsrp: rsrps, bbox: n ? [west, south, east, north] : null }
 }
 
+// Bundled from @deck.gl/* rather than a UMD global on window, so the versions
+// are pinned in package.json and tree-shaken like everything else.
 function deckApi() {
-  const g = globalThis.deck
-  if (!g?.MapboxOverlay || !g?.ScatterplotLayer) {
-    throw new Error('deck.gl UMD missing')
-  }
-  return g
+  return { MapboxOverlay, ScatterplotLayer, HeatmapLayer, HexagonLayer, ContourLayer }
 }
 
-function waitIdle(map) {
-  return new Promise((resolve) => {
+function waitIdle(map: any) {
+  return new Promise<void>((resolve) => {
     if (map.isStyleLoaded()) return resolve()
     const done = () => resolve()
     map.once('load', done)
@@ -99,7 +103,7 @@ export async function attachDeck(map) {
     })
     requestAnimationFrame(() => {
       document.querySelectorAll('#map canvas').forEach((el) => {
-        if (!el.classList.contains('maplibregl-canvas')) el.style.pointerEvents = 'none'
+        if (!el.classList.contains('maplibregl-canvas')) (el as HTMLElement).style.pointerEvents = 'none'
       })
     })
     return overlay
@@ -127,7 +131,7 @@ function binaryLayer(n, positions, colors) {
   }
 }
 
-export async function paintHeavy(map, { gh, dt, recipe } = {}) {
+export async function paintHeavy(map: any, { gh, dt, recipe }: any = {}) {
   map.__heavy = { gh, dt, recipe }
   if (!map.isStyleLoaded()) {
     // 'load' fires once per map lifetime and has already fired by the time we get
@@ -206,7 +210,7 @@ export async function paintHeavy(map, { gh, dt, recipe } = {}) {
       },
       cellSize: 110,
       aggregation: 'MEAN',
-      contours: CONTOUR_BANDS,
+      contours: CONTOUR_BANDS as any,
       zOffset: 0.005,
     }))
   }

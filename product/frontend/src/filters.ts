@@ -1,4 +1,4 @@
-import { v } from './lobes.js'
+import { v } from './lobes'
 
 export const EMPTY_REASON = {
   '5G Sub-6': '0 in this ingest — TOK cluster is 4G macro B3',
@@ -10,6 +10,13 @@ export const EMPTY_REASON = {
   DAS: '0 rooftops — ingest is MACRO only',
   VOC: '0 geocoded complaints in current ingest',
 }
+
+/** Layer/filter spec keys the Copilot may patch — validated before paint. */
+export const RECIPE_LAYER_KEYS = [
+  'sectorsLayer', 'spiderLayer', 'ghLayer', 'dtLayer', 'holesLayer',
+  'ghContourLayer', 'vocLayer', 'plannedLayer',
+]
+export const RECIPE_ARRAY_KEYS = ['tech', 'band', 'siteType', 'status', 'morphology', 'carrier']
 
 export function defaultRecipe() {
   return {
@@ -39,6 +46,51 @@ export function defaultRecipe() {
     azimuthRange: null,
     identity: '',
   }
+}
+
+function enumKeyForRecipe(key) {
+  if (key === 'siteType') return 'site_type'
+  return key
+}
+
+/** Validate a layer spec against inventory enums before the map runs it. */
+export function sanitizeRecipe(recipe, inv) {
+  const base = defaultRecipe()
+  const src = recipe && typeof recipe === 'object' ? recipe : {}
+  const next = { ...base, ...src }
+  const enums = inv?.enums || {}
+  for (const key of RECIPE_ARRAY_KEYS) {
+    const ek = enumKeyForRecipe(key)
+    const allowed = enums[ek]
+    const arr = Array.isArray(next[key]) ? next[key] : []
+    next[key] = allowed?.length ? arr.filter((x) => allowed.includes(x)) : arr
+  }
+  next.view = next.view === '3d' ? '3d' : '2d'
+  if (next.inAlarm === true || next.inAlarm === 'true') next.inAlarm = true
+  else if (next.inAlarm === false || next.inAlarm === 'false') next.inAlarm = false
+  else next.inAlarm = null
+  if (next.serviceAffecting != null) next.serviceAffecting = next.serviceAffecting === true ? true : null
+  if (next.azimuthRange) {
+    const ok = Array.isArray(next.azimuthRange) && next.azimuthRange.length === 2
+      && next.azimuthRange.every((n) => Number.isFinite(Number(n)))
+    if (!ok) next.azimuthRange = null
+    else {
+      const deg = (n) => ((Number(n) % 360) + 360) % 360
+      let [a, b] = [deg(next.azimuthRange[0]), deg(next.azimuthRange[1])]
+      // "facing 200 degrees" is a bearing, not a window. A zero-width range
+      // matches no cell and silently empties the map, so open it to ±25°.
+      const width = a <= b ? b - a : 360 - a + b
+      if (width < 1) { a = deg(a - 25); b = deg(b + 25) }
+      next.azimuthRange = [a, b]
+    }
+  }
+  for (const key of RECIPE_LAYER_KEYS) {
+    if (typeof next[key] !== 'boolean') next[key] = base[key]
+  }
+  if (typeof next.pci !== 'string') next.pci = String(next.pci ?? '')
+  if (!Array.isArray(next.height) || next.height.length !== 2) next.height = [null, null]
+  if (!Array.isArray(next.mechTilt) || next.mechTilt.length !== 2) next.mechTilt = [null, null]
+  return next
 }
 
 export function cellMatch(c, site, r) {
@@ -142,152 +194,20 @@ export function dismissChip(r, chip) {
   return next
 }
 
-function pillBtn(recipe, key, val, n) {
-  const on = Array.isArray(recipe[key]) ? recipe[key].includes(val) : recipe[key] === val
-  const zero = n === 0
-  const reason = EMPTY_REASON[val]
-  return `<button type="button" class="pill${on ? ' on' : ''}${zero ? ' zero' : ''}" data-key="${key}" data-val="${val}" title="${reason && zero ? reason : val}">${val}<small> ${n}</small></button>`
+export function toggleRecipePill(recipe, key, val) {
+  const next = { ...recipe }
+  if (key === 'inAlarm') next.inAlarm = recipe.inAlarm === true ? null : true
+  else if (key === 'sa') next.serviceAffecting = recipe.serviceAffecting === true ? null : true
+  else {
+    const arr = [...(recipe[key] || [])]
+    const i = arr.indexOf(val)
+    if (i >= 0) arr.splice(i, 1)
+    else arr.push(val)
+    next[key] = arr
+  }
+  return next
 }
 
-export function renderFacets(el, inv, recipe, onChange) {
-  const enums = inv.enums
-  const html = []
-  const pushGroup = (title, body) => {
-    html.push(`<section class="facet-group"><h2>${title}</h2>${body.join('')}</section>`)
-  }
-  const loudPills = (title, key, values, getN) => {
-    const live = values.filter((val) => getN(val) > 0 || !EMPTY_REASON[val])
-    if (!live.length) return
-    const rows = live.map((val) => pillBtn(recipe, key, val, getN(val))).join('')
-    return `<div class="facet"><h3>${title}</h3><div class="facet-row">${rows}</div></div>`
-  }
-
-  const layerStack = []
-  layerStack.push(`<div class="facet"><h3>Layer stack</h3>
-    <label class="toggle"><input type="checkbox" data-layer="plannedLayer" ${recipe.plannedLayer ? 'checked' : ''}/> Planned sites</label>
-    <label class="toggle"><input type="checkbox" data-layer="sectorsLayer" ${recipe.sectorsLayer ? 'checked' : ''}/> Sector lobes</label>
-    <label class="toggle"><input type="checkbox" data-layer="ghLayer" ${recipe.ghLayer ? 'checked' : ''}/> Groundhog (${nPts(inv.groundhog).toLocaleString()})</label>
-    <label class="toggle"><input type="checkbox" data-layer="dtLayer" ${recipe.dtLayer ? 'checked' : ''}/> Drive test routes (${Number(inv.drive_test_paths?.n_routes || 0).toLocaleString()})</label>
-  </div>`)
-  pushGroup('Layer Stack', layerStack)
-
-  const filtersCore = []
-  const statusRow = loudPills('Status', 'status', enums.status, (val) => inv.sites.filter((s) => v(s.status) === val).length)
-  if (statusRow) filtersCore.push(statusRow)
-  const bandRow = loudPills('Band', 'band', enums.band.length ? enums.band : ['B3'], (val) => new Set(inv.cells.filter((c) => v(c.band) === val).map((c) => c.site_id)).size)
-  if (bandRow) filtersCore.push(bandRow)
-  const carriers = [...new Set(inv.cells.map((c) => String(v(c.carrier) || '')).filter(Boolean))].sort()
-  if (carriers.length) {
-    const carrierRow = loudPills('Carrier', 'carrier', carriers, (val) => new Set(inv.cells.filter((c) => String(v(c.carrier)) === val).map((c) => c.site_id)).size)
-    if (carrierRow) filtersCore.push(carrierRow)
-  }
-
-  filtersCore.push(`<div class="facet"><h3>Fault</h3><div class="facet-row">
-    <button type="button" class="pill${recipe.inAlarm === true ? ' on' : ''}" data-key="inAlarm" data-val="true">in alarm<small> ${inv.sites.filter((s) => s.in_alarm).length}</small></button>
-    <button type="button" class="pill${recipe.serviceAffecting === true ? ' on' : ''}" data-key="sa" data-val="true">service affecting</button>
-  </div></div>`)
-  pushGroup('Layer Filters', filtersCore)
-
-  const vocN = nPts(inv.voc)
-  const dated = inv.sites.filter((s) => v(s.on_air_date)).length
-  const sourceSummary = []
-  sourceSummary.push(`<div class="facet"><h3>Data sources</h3><p class="hint">Sites ${inv.sites.length} · Cells ${inv.cells.length} · VOC ${vocN.toLocaleString()}</p></div>`)
-  sourceSummary.push(`<div class="facet"><h3>On-air date</h3>
-    <div class="range">
-      <label>from <input type="date" data-air="from" value="${recipe.onAirFrom || ''}" /></label>
-      <label>to <input type="date" data-air="to" value="${recipe.onAirTo || ''}" /></label>
-    </div>
-    <p class="hint">${dated} / ${inv.sites.length} sites with dates in current ingest.</p>
-  </div>`)
-  pushGroup('Data Sources', sourceSummary)
-
-  const techN = (val) => new Set(inv.cells.filter((c) => v(c.tech) === val).map((c) => c.site_id)).size
-  const typeN = (val) => inv.sites.filter((s) => v(s.site_type) === val).length
-  const morphN = (val) => inv.sites.filter((s) => v(s.morphology) === val).length
-  const emptyTech = (enums.tech || []).filter((val) => techN(val) === 0)
-  const emptyType = (enums.site_type || []).filter((val) => typeN(val) === 0)
-  const liveTech = (enums.tech || []).filter((val) => techN(val) > 0)
-  const liveType = (enums.site_type || []).filter((val) => typeN(val) > 0)
-  const emptyBits = []
-  if (emptyTech.length) emptyBits.push(emptyTech.join(', ') + ' — 4G only')
-  if (emptyType.length) emptyBits.push(emptyType.join(', ') + ' — MACRO only')
-  if (vocN === 0) emptyBits.push(EMPTY_REASON.VOC)
-
-  const saved = []
-  saved.push(`<details class="more-filters"><summary>Advanced filters</summary>`)
-  if (liveTech.length) {
-    saved.push(`<div class="facet"><h3>Technology</h3><div class="facet-row">${liveTech.map((val) => pillBtn(recipe, 'tech', val, techN(val))).join('')}</div></div>`)
-  }
-  if (liveType.length) {
-    saved.push(`<div class="facet"><h3>Site type</h3><div class="facet-row">${liveType.map((val) => pillBtn(recipe, 'siteType', val, typeN(val))).join('')}</div></div>`)
-  }
-  const morphRow = loudPills('Morphology', 'morphology', enums.morphology, morphN)
-  if (morphRow) saved.push(morphRow)
-  saved.push(`<div class="facet"><h3>More layers</h3>
-    <label class="toggle"><input type="checkbox" data-layer="spiderLayer" ${recipe.spiderLayer ? 'checked' : ''}/> Co-site spider · z≥14</label>
-    <label class="toggle"><input type="checkbox" data-layer="holesLayer" ${recipe.holesLayer ? 'checked' : ''}/> Coverage holes · GH RSRP ≤ −105</label>
-    <label class="toggle"><input type="checkbox" data-layer="ghContourLayer" ${recipe.ghContourLayer ? 'checked' : ''}/> Groundhog contour</label>
-    <label class="toggle"><input type="checkbox" data-layer="vocLayer" ${recipe.vocLayer ? 'checked' : ''}/> VOC · ${vocN} geocoded</label>
-  </div>`)
-  saved.push(`<div class="facet"><h3>PCI</h3><input class="pci-in" data-pci value="${recipe.pci || ''}" /></div>`)
-  saved.push(`<div class="facet"><h3>Height / tilt</h3><div class="range">
-    <label>h min <input type="number" data-h="0" value="${recipe.height[0] ?? ''}" /></label>
-    <label>h max <input type="number" data-h="1" value="${recipe.height[1] ?? ''}" /></label>
-    <label>tilt min <input type="number" data-t="0" value="${recipe.mechTilt[0] ?? ''}" /></label>
-    <label>tilt max <input type="number" data-t="1" value="${recipe.mechTilt[1] ?? ''}" /></label>
-  </div></div>`)
-  if (emptyBits.length) saved.push(`<p class="hint">${emptyBits.join(' · ')}</p>`)
-  saved.push(`</details>`)
-  pushGroup('Advanced', saved)
-
-  const wasOpen = el.querySelector('.more-filters')?.open
-  el.innerHTML = html.join('')
-  if (wasOpen) {
-    const d = el.querySelector('.more-filters')
-    if (d) d.open = true
-  }
-  el.querySelectorAll('.pill').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const key = btn.dataset.key
-      const val = btn.dataset.val
-      const next = { ...recipe }
-      if (key === 'inAlarm') next.inAlarm = recipe.inAlarm === true ? null : true
-      else if (key === 'sa') next.serviceAffecting = recipe.serviceAffecting === true ? null : true
-      else {
-        const arr = [...(recipe[key] || [])]
-        const i = arr.indexOf(val)
-        if (i >= 0) arr.splice(i, 1)
-        else arr.push(val)
-        next[key] = arr
-      }
-      onChange(next)
-    })
-  })
-  el.querySelectorAll('[data-layer]').forEach((inp) => {
-    inp.addEventListener('change', () => onChange({ ...recipe, [inp.dataset.layer]: inp.checked }))
-  })
-  const pci = el.querySelector('[data-pci]')
-  pci?.addEventListener('change', () => onChange({ ...recipe, pci: pci.value.trim() }))
-  el.querySelectorAll('[data-h]').forEach((inp) => {
-    inp.addEventListener('change', () => {
-      const h = [...recipe.height]
-      h[Number(inp.dataset.h)] = inp.value === '' ? null : Number(inp.value)
-      onChange({ ...recipe, height: h })
-    })
-  })
-  el.querySelectorAll('[data-t]').forEach((inp) => {
-    inp.addEventListener('change', () => {
-      const t = [...recipe.mechTilt]
-      t[Number(inp.dataset.t)] = inp.value === '' ? null : Number(inp.value)
-      onChange({ ...recipe, mechTilt: t })
-    })
-  })
-  el.querySelectorAll('[data-air]').forEach((inp) => {
-    inp.addEventListener('change', () => {
-      const next = { ...recipe }
-      if (inp.dataset.air === 'from') next.onAirFrom = inp.value
-      else next.onAirTo = inp.value
-      onChange(next)
-    })
-  })
+export function setRecipeLayer(recipe, key, on) {
+  return { ...recipe, [key]: on }
 }

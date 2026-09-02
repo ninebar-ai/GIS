@@ -1,7 +1,7 @@
 /** Tier-1 neighbour selection — geographic by definition (B1). A sector "faces" the
  *  target if the bearing to that point falls inside its own HPBW cone. No handover-
  *  count data needed: this is pure geometry over the cell plan already in inventory.json. */
-import { v } from './lobes.js'
+import { v } from './lobes'
 
 const EARTH_R = 6371000
 const DEFAULT_RADIUS_M = 1200
@@ -50,10 +50,28 @@ export function tier1CandidatesAt(inv, lat, lng, { radiusM = DEFAULT_RADIUS_M, e
   return out
 }
 
-export function tier1Candidates(inv, siteId, opts) {
+export function tier1Candidates(inv: any, siteId: string, opts: any = {}) {
   const target = inv.sites.find((s) => s.site_id === siteId)
   if (!target) return []
   return tier1CandidatesAt(inv, v(target.lat), v(target.lng), { ...opts, excludeSiteId: siteId })
+}
+
+/** Human-readable tier-1 neighbour summary for Copilot chat. */
+export function formatNeighborNarrate(inv, siteId, nb = null) {
+  const ids = nb ? monitoredIds(nb) : new Set(tier1Candidates(inv, siteId).map((c) => c.cellId))
+  const cells = inv.cells.filter((c) => ids.has(c.cell_id))
+  const bySite = new Map()
+  for (const c of cells) {
+    if (!bySite.has(c.site_id)) bySite.set(c.site_id, [])
+    bySite.get(c.site_id).push(String(v(c.cell_name) || c.cell_id))
+  }
+  if (!bySite.size) {
+    return `No tier-1 facing neighbours within 1.2 km for ${siteId}. Click sectors on the map to add manually.`
+  }
+  const parts = [...bySite.entries()].map(([sid, secs]) => `${sid} (${secs.join(', ')})`)
+  const nCells = ids.size
+  const nSites = bySite.size
+  return `Tier-1 neighbours for ${siteId} — ${nCells} monitored sector${nCells === 1 ? '' : 's'} across ${nSites} site${nSites === 1 ? '' : 's'}: ${parts.join('; ')}.`
 }
 
 export function targetCoords(inv, n) {
@@ -102,7 +120,7 @@ export function candidateFc(n) {
   }
 }
 
-export function sessionKey(n) {
+export function sessionKey(n: any) {
   if (!n) return null
   if (n.kind === 'pin') return `pin:${Number(n.lat).toFixed(5)},${Number(n.lng).toFixed(5)}`
   return `site:${n.targetId}`
@@ -143,7 +161,7 @@ export function applyRecall(autoIds, recalled) {
   return { auto, added, removed, events }
 }
 
-export function appendEvent(n, action, cellId) {
+export function appendEvent(n: any, action: string, cellId?: string | null) {
   n.events = n.events || []
   n.events.push({ t: nowIso(), action, cellId: cellId || null })
 }

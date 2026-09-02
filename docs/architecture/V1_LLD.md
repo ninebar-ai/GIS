@@ -1,7 +1,7 @@
 # NS-QAW V1 Low-Level Design (LLD)
 
 ## 1) Purpose
-This document specifies module-level behavior, runtime contracts, and render/control flows for V1 (`A1-A3 + B1`) in `ns-qaw-a`.
+This document specifies module-level behavior, runtime contracts, and render/control flows for V1 (`A1-A3 + B1`) in `product/`.
 
 ## 2) File-Level Architecture
 ```mermaid

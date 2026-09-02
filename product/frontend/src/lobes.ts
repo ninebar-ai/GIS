@@ -5,10 +5,16 @@ export function v(field) {
   return field
 }
 
+/**
+ * Gaussian main lobe. Dividing by the full HPBW puts −3 dB at ±HPBW/2, which is
+ * what the −3 dB contour means and what neighbors.js already tests against
+ * (angDiff > hpbw / 2). Dividing by hpbwRad/2 drew the contour at ±HPBW/4 and
+ * turned every sector into a 3.75:1 needle.
+ */
 export function gain(rel, hpbwRad) {
-  const a = Math.exp(-2.773 * (rel / (hpbwRad / 2)) ** 2)
+  const a = Math.exp(-2.773 * (rel / hpbwRad) ** 2)
   const back = 0.085 * Math.exp(-2.0 * ((Math.abs(rel) - Math.PI) / 1.1) ** 2)
-  return Math.max(a, back, 0.035)
+  return Math.max(a, back, 0.02)
 }
 
 function wrapPi(rel) {
@@ -30,12 +36,28 @@ export function offsetOrigin(lng, lat, azimuthDeg, { index = 0, band = 'B3' } = 
   return [lng + dE * mLng, lat + dN * mLat]
 }
 
-/** Ground reach from height + mechanical + electrical tilt. HPBW is the −3 dB contour width. */
-export function groundReachDeg(heightM, mechTilt, elecTilt) {
-  const h = heightM || 30
-  const tilt = Math.max(1.5, (mechTilt || 0) + (elecTilt || 0))
-  const metres = h / Math.tan((tilt * Math.PI) / 180)
-  return Math.min(0.011, Math.max(0.0015, metres / 111320))
+/** On-screen lobe length in CSS pixels. The one knob for sector size. */
+export const LOBE_PX = 72
+
+/** 3D beam extrusion height, metres. Constant so extrusions match the 2D lobes. */
+export const BEAM_HEIGHT_M = 90
+
+/** Ground metres per pixel at zoom 0, lat 0. MapLibre tiles are 512 px: 40075016.686 / 512. */
+const M_PER_PX_Z0 = 78271.5170
+
+/**
+ * Every lobe the same size on screen, at every zoom.
+ *
+ * Reach used to be h / tan(tilt), which across this ingest spans 366–1088 m —
+ * driven almost entirely by elec_tilt, since mech_tilt and hpbw are constant.
+ * That made sectors look like scattered fireflies rather than one instrument.
+ * Tilt and height stay on the site card; they no longer drive geometry.
+ *
+ * Returns latitude degrees — lobePolygon divides the longitude component by cos(lat).
+ */
+export function screenReachDeg(lat, zoom) {
+  const mPerPx = (M_PER_PX_Z0 * Math.cos((lat * Math.PI) / 180)) / 2 ** zoom
+  return (LOBE_PX * mPerPx) / 111320
 }
 
 export function lobePolygon(lng, lat, azimuthDeg, hpbwDeg, reachDeg) {
@@ -54,11 +76,17 @@ export function lobePolygon(lng, lat, azimuthDeg, hpbwDeg, reachDeg) {
   return ring
 }
 
-function statusColor(status, inAlarm) {
-  if (inAlarm || status === 'partial') return '#A9433A'
-  if (status === 'planned') return '#9A7614'
-  if (status === 'locked') return '#8A8378'
-  return '#1A1612'
+/**
+ * On-air is drawn as plain ink — it is the baseline, and only the exceptions
+ * (alarm, planned, locked) get colour. That inverts on a dark basemap: near-black
+ * on #0E1216 is invisible, so the baseline becomes light instead. The exception
+ * hues are legible either way and stay put.
+ */
+function statusColor(status, inAlarm, dark = false) {
+  if (inAlarm || status === 'partial') return dark ? '#E4685C' : '#A9433A'
+  if (status === 'planned') return dark ? '#D9A62A' : '#9A7614'
+  if (status === 'locked') return dark ? '#7C776E' : '#8A8378'
+  return dark ? '#DCD8CE' : '#1A1612'
 }
 
 function inBounds(lng, lat, b, pad = 0.04) {
@@ -70,7 +98,7 @@ function inBounds(lng, lat, b, pad = 0.04) {
   return lng >= west - pad && lng <= east + pad && lat >= south - pad && lat <= north + pad
 }
 
-export function buildGeo(sites, cells, { bandPin = null, selectedId = null, bounds = null, zoom = 13, keepIds = null } = {}) {
+export function buildGeo(sites, cells, { bandPin = null, selectedId = null, bounds = null, zoom = 13, keepIds = null, dark = false } = {}) {
   const bySite = Object.fromEntries(sites.map((s) => [s.site_id, s]))
   const siteFc = { type: 'FeatureCollection', features: [] }
   const sectorFc = { type: 'FeatureCollection', features: [] }
@@ -91,7 +119,7 @@ export function buildGeo(sites, cells, { bandPin = null, selectedId = null, boun
         id: s.site_id,
         status,
         in_alarm: s.in_alarm ? 1 : 0,
-        color: statusColor(status, s.in_alarm),
+        color: statusColor(status, s.in_alarm, dark),
         selected: selectedId === s.site_id ? 1 : 0,
       },
       geometry: { type: 'Point', coordinates: [lng, lat] },
@@ -113,10 +141,9 @@ export function buildGeo(sites, cells, { bandPin = null, selectedId = null, boun
     const i = idxBySite[c.site_id] || 0
     idxBySite[c.site_id] = i + 1
     const [lng, lat] = offsetOrigin(lng0, lat0, az, { index: i, band: v(c.band) })
-    const reach = groundReachDeg(v(c.height_m) || v(site.height_m), v(c.mech_tilt), v(c.elec_tilt))
-    const color = statusColor(v(c.status), c.in_alarm)
+    const reach = screenReachDeg(lat, zoom)
+    const color = statusColor(v(c.status), c.in_alarm, dark)
     const selected = selectedId === c.site_id || selectedId === c.cell_id
-    const tilt = (v(c.mech_tilt) || 0) + (v(c.elec_tilt) || 0)
     sectorFc.features.push({
       type: 'Feature',
       id: c.cell_id,
@@ -130,7 +157,8 @@ export function buildGeo(sites, cells, { bandPin = null, selectedId = null, boun
         color,
         selected: selected ? 1 : 0,
         in_alarm: c.in_alarm ? 1 : 0,
-        beam_height_m: Math.max(40, (v(c.height_m) || 28) * Math.max(1.2, 4.2 - tilt * 0.12)),
+        // Constant, for the same reason reach is constant: uniform beams read as one instrument.
+        beam_height_m: BEAM_HEIGHT_M,
       },
       geometry: { type: 'Polygon', coordinates: [lobePolygon(lng, lat, az, hpbw, reach)] },
     })
